@@ -1,46 +1,122 @@
-import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card"
+"use client"
+
+import { useState, useEffect } from "react"
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { supabase } from "@/lib/supabase"
+
+function getAnalysisStatus(consumed: number, budget: number) {
+  if (budget <= 0) return { text: "未使用", colorClass: "text-gray-500", bgClass: "bg-gray-500" }
+  if (consumed >= budget) {
+    return { text: "已超支", colorClass: "text-red-500", bgClass: "bg-red-500" }
+  }
+  if (consumed >= budget * 0.8) {
+    return { text: "接近上限", colorClass: "text-orange-500", bgClass: "bg-orange-500" }
+  }
+  return { text: "正常", colorClass: "text-green-500", bgClass: "bg-green-500" }
+}
 
 export default function AnalysisPage() {
-  // Mock Data for Tabs
-  const dailyFixedStats = [
-    { name: "早餐", budget: 6, consumed: 6, percent: 100, status: "已达标" },
-    { name: "午餐", budget: 20, consumed: 15, percent: 75, status: "正常" },
-    { name: "晚餐", budget: 18, consumed: 0, percent: 0, status: "未使用" },
-  ]
+  const [loading, setLoading] = useState(true)
+  
+  const [dailyBudgets, setDailyBudgets] = useState<any[]>([])
+  const [monthlyFixedBudgets, setMonthlyFixedBudgets] = useState<any[]>([])
+  const [monthlyElasticBudgets, setMonthlyElasticBudgets] = useState<any[]>([])
+  const [balanceRecords, setBalanceRecords] = useState<any[]>([])
+  
+  const [totalBudget, setTotalBudget] = useState(0)
+  const [totalConsumed, setTotalConsumed] = useState(0)
 
-  const monthlyFixedStats = [
-    { name: "房租", budget: 2000, consumed: 2000, percent: 100, status: "已扣除" },
-    { name: "话费", budget: 100, consumed: 50, percent: 50, status: "正常进度" },
-  ]
+  useEffect(() => {
+    async function fetchData() {
+      try {
+        setLoading(true)
+        const [dailyRes, monthlyFixedRes, monthlyElasticRes, balanceRes] = await Promise.all([
+          supabase.from("daily_fixed_budgets").select("*"),
+          supabase.from("monthly_fixed_budgets").select("*"),
+          supabase.from("monthly_elastic_budgets").select("*"),
+          supabase.from("monthly_balance_records").select("*").order("year", { ascending: false }).order("month", { ascending: false }),
+        ])
 
-  const monthlyElasticStats = [
-    { name: "餐饮", budget: 1000, consumed: 800, percent: 80, status: "接近上限" },
-    { name: "交通", budget: 300, consumed: 120, percent: 40, status: "健康" },
-  ]
+        const dailyData = dailyRes.data || []
+        const monthlyFixedData = monthlyFixedRes.data || []
+        const monthlyElasticData = monthlyElasticRes.data || []
 
-  // Mock Data for Balance Records
-  const balanceRecords = [
-    { month: "2026-02", budget: 8000, consumed: 7500, balance: 500, cumulative: 12000 },
-    { month: "2026-01", budget: 8000, consumed: 7800, balance: 200, cumulative: 11500 },
-    { month: "2025-12", budget: 8000, consumed: 8200, balance: -200, cumulative: 11300 },
-  ]
+        setDailyBudgets(dailyData)
+        setMonthlyFixedBudgets(monthlyFixedData)
+        setMonthlyElasticBudgets(monthlyElasticData)
+        setBalanceRecords(balanceRes.data || [])
 
-  const renderProgressItem = (item: any, colorClass: string) => (
-    <div key={item.name} className="space-y-2 pb-4 border-b border-gray-50 last:border-0 last:pb-0">
-      <div className="flex justify-between items-end">
-        <span className="text-sm font-medium text-gray-700">{item.name}</span>
-        <span className="text-xs text-gray-500">¥{item.consumed} / ¥{item.budget}</span>
+        let tBudget = 0
+        let tConsumed = 0
+
+        dailyData.forEach(item => {
+          tBudget += Number(item.monthly_budget || item.base_daily_budget * 30 || 0)
+          tConsumed += Number(item.consumed || 0)
+        })
+        monthlyFixedData.forEach(item => {
+          tBudget += Number(item.monthly_budget || 0)
+          tConsumed += Number(item.consumed || 0)
+        })
+        monthlyElasticData.forEach(item => {
+          tBudget += Number(item.monthly_budget || 0)
+          tConsumed += Number(item.consumed || 0)
+        })
+
+        setTotalBudget(tBudget)
+        setTotalConsumed(tConsumed)
+
+      } catch (error) {
+        console.error("Error fetching analysis data:", error)
+      } finally {
+        setLoading(false)
+      }
+    }
+    fetchData()
+  }, [])
+
+  if (loading) {
+    return (
+      <main className="min-h-screen bg-gray-50 flex items-center justify-center pb-24">
+        <div className="text-gray-500 font-medium">加载中...</div>
+      </main>
+    )
+  }
+
+  const renderProgressItem = (item: any) => {
+    // try to get monthly_budget, then fallback to base_daily_budget if it exists
+    const budgetVal = Number(item.monthly_budget || item.base_daily_budget || 0)
+    const consumedVal = Number(item.consumed || 0)
+    
+    const percent = budgetVal > 0 ? (consumedVal / budgetVal) * 100 : 0
+    const status = getAnalysisStatus(consumedVal, budgetVal)
+
+    return (
+      <div key={item.id} className="space-y-2 pb-4 border-b border-gray-50 last:border-0 last:pb-0">
+        <div className="flex justify-between items-end">
+          <span className="text-sm font-medium text-gray-700">{item.name}</span>
+          <span className="text-xs text-gray-500">¥{consumedVal.toFixed(2)} / ¥{budgetVal.toFixed(2)}</span>
+        </div>
+        <div className="h-2 w-full bg-gray-100 rounded-full overflow-hidden">
+          <div 
+            className={`h-full ${status.bgClass} rounded-full transition-all duration-500`} 
+            style={{ width: `${Math.min(percent, 100)}%` }}
+          />
+        </div>
+        <div className={`text-xs text-right font-medium ${status.colorClass}`}>{status.text}</div>
       </div>
-      <div className="h-2 w-full bg-gray-100 rounded-full overflow-hidden">
-        <div 
-          className={`h-full ${colorClass} rounded-full transition-all duration-500`} 
-          style={{ width: `${Math.min(item.percent, 100)}%` }}
-        />
-      </div>
-      <div className="text-xs text-gray-400 text-right">{item.status}</div>
-    </div>
-  )
+    )
+  }
+
+  const overallRatio = totalBudget > 0 ? (totalConsumed / totalBudget) : 0
+  let overallEvaluation = "整体情况良好，继续保持！"
+  if (overallRatio > 0.8 && overallRatio <= 1) {
+    overallEvaluation = `当前总支出已达 ${(overallRatio * 100).toFixed(0)}%，已接近警戒线，请注意控制接下来的消费！`
+  } else if (overallRatio > 1) {
+    overallEvaluation = `当前总支出已超支 ${((overallRatio - 1) * 100).toFixed(0)}%，请紧急审视各项开支！`
+  } else if (totalBudget === 0) {
+    overallEvaluation = "暂无有效的预算项目，请前往设置配置预算。"
+  }
 
   return (
     <main className="min-h-screen bg-gray-50 pt-4 pb-24 px-4">
@@ -63,7 +139,10 @@ export default function AnalysisPage() {
                   <CardTitle className="text-sm font-medium">每日固定预算执行情况</CardTitle>
                 </CardHeader>
                 <CardContent className="pt-4 space-y-4">
-                  {dailyFixedStats.map(item => renderProgressItem(item, "bg-green-500"))}
+                  {dailyBudgets.length > 0 
+                    ? dailyBudgets.map(item => renderProgressItem(item)) 
+                    : <div className="text-center text-sm text-gray-400 py-4">暂无数据</div>
+                  }
                 </CardContent>
               </Card>
             </TabsContent>
@@ -74,7 +153,10 @@ export default function AnalysisPage() {
                   <CardTitle className="text-sm font-medium">每月固定预算扣款进度</CardTitle>
                 </CardHeader>
                 <CardContent className="pt-4 space-y-4">
-                  {monthlyFixedStats.map(item => renderProgressItem(item, "bg-blue-500"))}
+                  {monthlyFixedBudgets.length > 0 
+                    ? monthlyFixedBudgets.map(item => renderProgressItem(item)) 
+                    : <div className="text-center text-sm text-gray-400 py-4">暂无数据</div>
+                  }
                 </CardContent>
               </Card>
             </TabsContent>
@@ -85,7 +167,10 @@ export default function AnalysisPage() {
                   <CardTitle className="text-sm font-medium">每月弹性消费监控</CardTitle>
                 </CardHeader>
                 <CardContent className="pt-4 space-y-4">
-                  {monthlyElasticStats.map(item => renderProgressItem(item, "bg-amber-500"))}
+                  {monthlyElasticBudgets.length > 0
+                    ? monthlyElasticBudgets.map(item => renderProgressItem(item))
+                    : <div className="text-center text-sm text-gray-400 py-4">暂无数据</div>
+                  }
                 </CardContent>
               </Card>
             </TabsContent>
@@ -103,7 +188,7 @@ export default function AnalysisPage() {
             </CardHeader>
             <CardContent>
               <p className="text-sm text-indigo-700 leading-relaxed">
-                本月弹性预算已消耗 80%，特别是在“餐饮”分类上接近警戒线。建议在接下来的日子里适当控制弹性支出，确保能达成月度储蓄目标。每日固定预算执行堪称完美，继续保持！
+                {overallEvaluation}
               </p>
             </CardContent>
           </Card>
@@ -115,20 +200,34 @@ export default function AnalysisPage() {
             </CardHeader>
             <CardContent className="p-0">
               <div className="divide-y divide-gray-50">
-                {balanceRecords.map((record) => (
-                  <div key={record.month} className="p-4 flex flex-col gap-2">
-                    <div className="flex justify-between items-center">
-                      <span className="font-semibold text-gray-800">{record.month}</span>
-                      <span className="text-sm font-medium text-green-600">累计: ¥{record.cumulative}</span>
-                    </div>
-                    <div className="flex justify-between text-xs text-gray-500">
-                      <span>预算: ¥{record.budget} / 消费: ¥{record.consumed}</span>
-                      <span className={record.balance >= 0 ? "text-green-500" : "text-red-500"}>
-                        结余: {record.balance > 0 ? '+' : ''}{record.balance}
-                      </span>
-                    </div>
+                {balanceRecords.length === 0 ? (
+                  <div className="p-6 text-center text-sm text-gray-500">
+                    暂无历史结算记录
                   </div>
-                ))}
+                ) : (
+                  balanceRecords.map((record) => {
+                    const monthKey = `${record.year}-${String(record.month).padStart(2, '0')}`;
+                    const budget = record.monthly_budget || 0;
+                    const consumed = record.monthly_actual_consumed || 0;
+                    const balance = record.monthly_balance || 0;
+                    const cumulative = record.cumulative_balance || 0;
+
+                    return (
+                      <div key={record.id || monthKey} className="p-4 flex flex-col gap-2">
+                        <div className="flex justify-between items-center">
+                          <span className="font-semibold text-gray-800">{monthKey}</span>
+                          <span className="text-sm font-medium text-green-600">累计: ¥{cumulative.toFixed(2)}</span>
+                        </div>
+                        <div className="flex justify-between text-xs text-gray-500">
+                          <span>预算: ¥{budget.toFixed(2)} / 消费: ¥{consumed.toFixed(2)}</span>
+                          <span className={balance >= 0 ? "text-green-500" : "text-red-500"}>
+                            结余: {balance > 0 ? '+' : ''}{balance.toFixed(2)}
+                          </span>
+                        </div>
+                      </div>
+                    )
+                  })
+                )}
               </div>
             </CardContent>
           </Card>
