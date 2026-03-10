@@ -52,7 +52,7 @@ export default function AddTransactionPage() {
         if (dailyRes.data) {
           combinedItems.push(...dailyRes.data.map(item => ({
             id: item.id,
-            name: `${item.name} (每日固定)`,
+            name: item.name,
             budget_type: "daily_fixed" as BudgetType
           })))
         }
@@ -60,7 +60,7 @@ export default function AddTransactionPage() {
         if (monthlyFixedRes.data) {
           combinedItems.push(...monthlyFixedRes.data.map(item => ({
             id: item.id,
-            name: `${item.name} (每月固定)`,
+            name: item.name,
             budget_type: "monthly_fixed" as BudgetType
           })))
         }
@@ -68,7 +68,7 @@ export default function AddTransactionPage() {
         if (monthlyElasticRes.data) {
           combinedItems.push(...monthlyElasticRes.data.map(item => ({
             id: item.id,
-            name: `${item.name} (每月弹性)`,
+            name: item.name,
             budget_type: "monthly_elastic" as BudgetType
           })))
         }
@@ -88,8 +88,9 @@ export default function AddTransactionPage() {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
 
-    if (!amount || isNaN(Number(amount))) {
-      alert("请输入有效的金额")
+    const numericAmount = Number(amount)
+    if (numericAmount <= 0) {
+      alert("金额必须大于 0")
       return
     }
 
@@ -204,6 +205,7 @@ export default function AddTransactionPage() {
                   <Input
                     id="amount"
                     type="number"
+                    min="0.01"
                     step="0.01"
                     placeholder="0.00"
                     className="pl-8 text-lg font-semibold h-12"

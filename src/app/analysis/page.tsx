@@ -4,6 +4,7 @@ import { useState, useEffect } from "react"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { supabase } from "@/lib/supabase"
+import { BarChart, Bar, XAxis, Tooltip, ResponsiveContainer } from "recharts"
 
 function getAnalysisStatus(consumed: number, budget: number) {
   if (budget <= 0) return { text: "未使用", colorClass: "text-gray-500", bgClass: "bg-gray-500" }
@@ -23,6 +24,7 @@ export default function AnalysisPage() {
   const [monthlyFixedBudgets, setMonthlyFixedBudgets] = useState<any[]>([])
   const [monthlyElasticBudgets, setMonthlyElasticBudgets] = useState<any[]>([])
   const [balanceRecords, setBalanceRecords] = useState<any[]>([])
+  const [trendData, setTrendData] = useState<{ date: string; amount: number }[]>([])
   
   const [totalBudget, setTotalBudget] = useState(0)
   const [totalConsumed, setTotalConsumed] = useState(0)
@@ -31,11 +33,12 @@ export default function AnalysisPage() {
     async function fetchData() {
       try {
         setLoading(true)
-        const [dailyRes, monthlyFixedRes, monthlyElasticRes, balanceRes] = await Promise.all([
+        const [dailyRes, monthlyFixedRes, monthlyElasticRes, balanceRes, txRes] = await Promise.all([
           supabase.from("daily_fixed_budgets").select("*"),
           supabase.from("monthly_fixed_budgets").select("*"),
           supabase.from("monthly_elastic_budgets").select("*"),
           supabase.from("monthly_balance_records").select("*").order("year", { ascending: false }).order("month", { ascending: false }),
+          supabase.from("transactions").select("amount, date").order("date", { ascending: false })
         ])
 
         const dailyData = dailyRes.data || []
@@ -65,6 +68,33 @@ export default function AnalysisPage() {
 
         setTotalBudget(tBudget)
         setTotalConsumed(tConsumed)
+
+        // Process 7 days trend data
+        const transactions = txRes.data || []
+        const last7Days: { date: string; amount: number }[] = []
+        
+        for (let i = 6; i >= 0; i--) {
+          const d = new Date()
+          d.setDate(d.getDate() - i)
+          // YYYY-MM-DD format
+          const yyyy = d.getFullYear()
+          const mm = String(d.getMonth() + 1).padStart(2, '0')
+          const dd = String(d.getDate()).padStart(2, '0')
+          const dateStr = `${yyyy}-${mm}-${dd}`
+          
+          // sum amount for that day (expenses usually negative in tx, but PRD uses positive for spending, we take absolute value or negative values if PRD uses negative)
+          // assuming negative is expense based on previous code `< 0 ? Math.abs`
+          const dailyTotal = transactions
+            .filter(tx => tx.date === dateStr && (tx.amount || 0) < 0)
+            .reduce((sum, tx) => sum + Math.abs(Number(tx.amount || 0)), 0)
+            
+          last7Days.push({
+            date: `${mm}-${dd}`,
+            amount: dailyTotal
+          })
+        }
+        
+        setTrendData(last7Days)
 
       } catch (error) {
         console.error("Error fetching analysis data:", error)
@@ -179,6 +209,46 @@ export default function AnalysisPage() {
 
         {/* 下模块：评价与记录 */}
         <section className="space-y-4">
+          
+          {/* 近 7 天趋势 */}
+          <Card className="border-0 shadow-sm">
+            <CardHeader className="pb-3 border-b border-gray-50">
+              <CardTitle className="text-sm font-medium">近 7 天支出趋势</CardTitle>
+            </CardHeader>
+            <CardContent className="pt-4">
+              {trendData.length > 0 ? (
+                <div className="h-[200px] w-full">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <BarChart data={trendData}>
+                      <XAxis 
+                        dataKey="date" 
+                        axisLine={false} 
+                        tickLine={false} 
+                        tick={{ fontSize: 12, fill: "#9ca3af" }}
+                        dy={10}
+                      />
+                      <Tooltip 
+                        cursor={{ fill: "#f3f4f6" }}
+                        contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }}
+                        formatter={(value: any) => [`¥${Number(value).toFixed(2)}`, "支出"]}
+                        labelStyle={{ color: '#374151', fontWeight: 500, marginBottom: '4px' }}
+                      />
+                      <Bar 
+                        dataKey="amount" 
+                        fill="#3b82f6" 
+                        radius={[4, 4, 0, 0]} 
+                      />
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+              ) : (
+                <div className="h-[200px] flex items-center justify-center text-sm text-gray-400">
+                  暂无支出数据
+                </div>
+              )}
+            </CardContent>
+          </Card>
+
           {/* 状态评价 */}
           <Card className="bg-gradient-to-br from-indigo-50 to-blue-50 border-0 shadow-sm">
             <CardHeader className="pb-2">

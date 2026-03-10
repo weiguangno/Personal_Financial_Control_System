@@ -16,6 +16,7 @@ export default function Home() {
   const [monthlyElasticRemaining, setMonthlyElasticRemaining] = useState(0)
   const [recentTransactions, setRecentTransactions] = useState<Partial<Transaction>[]>([])
   const [totalConsumed, setTotalConsumed] = useState(0)
+  const [deletingId, setDeletingId] = useState<string | null>(null)
   
   const [calculatedOverview, setCalculatedOverview] = useState({
     monthlyBudget: 0,
@@ -23,77 +24,189 @@ export default function Home() {
   })
   
   // Mixed overview data
-  const topOverview = {
-    todayAvailable: 45.00, // Static placeholder
-    todayStatus: "🟢 正常",
-    monthRemaining: calculatedOverview.monthRemaining,
-    monthBalance: 500.00, // Static placeholder
-    monthlyBudget: calculatedOverview.monthlyBudget,
-    cumulativeBalance: 12500.00, // Static placeholder
+  const [topOverview, setTopOverview] = useState({
+    todayAvailable: 0,
+    todayStatus: { text: "🟢 正常", color: "text-green-500" },
+    monthRemaining: 0,
+    monthBalance: 0,
+    monthlyBudget: 0,
+    cumulativeBalance: 0,
+  })
+
+  const fetchHomeData = async () => {
+    try {
+      setLoading(true)
+      
+      const [txRes, dailyRes, monthlyFixedRes, monthlyElasticRes, togglesRes, globalRes] = await Promise.all([
+        supabase.from("transactions").select("*").order("created_at", { ascending: false }),
+        supabase.from("daily_fixed_budgets").select("*"),
+        supabase.from("monthly_fixed_budgets").select("*"),
+        supabase.from("monthly_elastic_budgets").select("*"),
+        supabase.from("system_toggles").select("*").limit(1).maybeSingle(),
+        supabase.from("global_settings").select("*").limit(1).maybeSingle(),
+      ])
+      
+      const toggles = togglesRes.data?.toggles || {}
+      const global = globalRes.data || {}
+      
+      let totalMonthlyBudget = 0;
+      let totalRemaining = 0;
+      let todayAvailable = 0;
+
+      if (txRes.data) {
+        setRecentTransactions(txRes.data.slice(0, 5))
+        // Calculate total consumed
+        const consumed = txRes.data.reduce((acc, curr) => acc + (curr.amount < 0 ? Math.abs(curr.amount) : 0), 0)
+        setTotalConsumed(consumed)
+      }
+      
+      if (dailyRes.data) {
+        totalMonthlyBudget += dailyRes.data.reduce((acc, curr) => acc + (curr.monthly_budget || 0), 0)
+        totalRemaining += dailyRes.data.reduce((acc, curr) => acc + (curr.remaining || 0), 0)
+        todayAvailable = dailyRes.data.reduce((acc, curr) => acc + (curr.today_dynamic_budget || curr.base_daily_budget || 0), 0)
+        
+        // Map to match the interface as best we can
+        setDailyBudgets(dailyRes.data.map(item => ({
+          id: item.id,
+          name: item.name,
+          todayDynamicBudget: item.today_dynamic_budget || item.base_daily_budget || 0,
+          consumed: item.consumed || 0
+        })))
+      }
+      
+      if (monthlyFixedRes.data) {
+        totalMonthlyBudget += monthlyFixedRes.data.reduce((acc, curr) => acc + (curr.monthly_budget || 0), 0)
+        const remaining = monthlyFixedRes.data.reduce((acc, curr) => acc + (curr.remaining || 0), 0)
+        totalRemaining += remaining
+        setMonthlyFixedRemaining(remaining)
+      }
+      
+      if (monthlyElasticRes.data) {
+        totalMonthlyBudget += monthlyElasticRes.data.reduce((acc, curr) => acc + (curr.monthly_budget || 0), 0)
+        const remaining = monthlyElasticRes.data.reduce((acc, curr) => acc + (curr.remaining || 0), 0)
+        totalRemaining += remaining
+        setMonthlyElasticRemaining(remaining)
+      }
+
+      setCalculatedOverview({
+        monthlyBudget: totalMonthlyBudget,
+        monthRemaining: totalRemaining,
+      })
+
+      // Calculate Today & Month PRD Logic
+      const d = new Date()
+      const todayStr = d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0')
+      const currentMonthStr = todayStr.substring(0, 7)
+      
+      const includeElasticInTodayCheck = toggles.includeElasticInTodayCheck || false
+      const transactions = txRes.data || []
+      
+      const todayConsumed = transactions
+        .filter(tx => tx.date === todayStr && tx.amount < 0 && (tx.budget_type === 'daily_fixed' || (includeElasticInTodayCheck && tx.budget_type === 'monthly_elastic')))
+        .reduce((sum, tx) => sum + Math.abs(tx.amount), 0)
+        
+      const todayRatio = todayAvailable > 0 ? (todayConsumed / todayAvailable) : 0
+      let todayStatusText = '🟢 正常'
+      let todayStatusColor = 'text-green-500'
+      if (todayRatio > 1) {
+        todayStatusText = '🔴 超支'
+        todayStatusColor = 'text-red-500'
+      } else if (todayRatio >= 0.85) {
+        todayStatusText = '🟠 紧张'
+        todayStatusColor = 'text-orange-500'
+      } else if (todayRatio >= 0.70) {
+        todayStatusText = '🟡 注意'
+        todayStatusColor = 'text-yellow-500'
+      }
+
+      const globalMonthlyBudget = global.monthly_budget || 0
+      const savingsTarget = global.savings_target || 0
+      const deductSavingsFromBudget = toggles.deductSavingsFromBudget || false
+      const availableMonthlyBudget = deductSavingsFromBudget ? Math.max(0, globalMonthlyBudget - savingsTarget) : globalMonthlyBudget
+      
+      const monthConsumed = transactions
+        .filter(tx => tx.date && tx.date.startsWith(currentMonthStr) && tx.amount < 0)
+        .reduce((sum, tx) => sum + Math.abs(tx.amount), 0)
+        
+      const monthRemaining = availableMonthlyBudget - monthConsumed
+
+      setTopOverview({
+        todayAvailable,
+        todayStatus: { text: todayStatusText, color: todayStatusColor },
+        monthRemaining: monthRemaining,
+        monthBalance: totalRemaining, 
+        monthlyBudget: globalMonthlyBudget,
+        cumulativeBalance: global.initial_cumulative_balance || 0,
+      })
+    } catch (error) {
+      console.error("Error fetching home data:", error)
+    } finally {
+      setLoading(false)
+    }
   }
 
   useEffect(() => {
-    async function fetchHomeData() {
-      try {
-        setLoading(true)
-        
-        const [txRes, dailyRes, monthlyFixedRes, monthlyElasticRes] = await Promise.all([
-          supabase.from("transactions").select("*").order("created_at", { ascending: false }),
-          supabase.from("daily_fixed_budgets").select("*"),
-          supabase.from("monthly_fixed_budgets").select("*"),
-          supabase.from("monthly_elastic_budgets").select("*"),
-        ])
-        
-        let totalMonthlyBudget = 0;
-        let totalRemaining = 0;
-
-        if (txRes.data) {
-          setRecentTransactions(txRes.data.slice(0, 5))
-          // Calculate total consumed
-          const consumed = txRes.data.reduce((acc, curr) => acc + (curr.amount < 0 ? Math.abs(curr.amount) : 0), 0)
-          setTotalConsumed(consumed)
-        }
-        
-        if (dailyRes.data) {
-          totalMonthlyBudget += dailyRes.data.reduce((acc, curr) => acc + (curr.monthly_budget || 0), 0)
-          totalRemaining += dailyRes.data.reduce((acc, curr) => acc + (curr.remaining || 0), 0)
-          
-          // Map to match the interface as best we can
-          setDailyBudgets(dailyRes.data.map(item => ({
-            id: item.id,
-            name: item.name,
-            todayDynamicBudget: item.today_dynamic_budget || item.base_daily_budget || 0,
-            consumed: item.consumed || 0
-          })))
-        }
-        
-        if (monthlyFixedRes.data) {
-          totalMonthlyBudget += monthlyFixedRes.data.reduce((acc, curr) => acc + (curr.monthly_budget || 0), 0)
-          const remaining = monthlyFixedRes.data.reduce((acc, curr) => acc + (curr.remaining || 0), 0)
-          totalRemaining += remaining
-          setMonthlyFixedRemaining(remaining)
-        }
-        
-        if (monthlyElasticRes.data) {
-          totalMonthlyBudget += monthlyElasticRes.data.reduce((acc, curr) => acc + (curr.monthly_budget || 0), 0)
-          const remaining = monthlyElasticRes.data.reduce((acc, curr) => acc + (curr.remaining || 0), 0)
-          totalRemaining += remaining
-          setMonthlyElasticRemaining(remaining)
-        }
-
-        setCalculatedOverview({
-          monthlyBudget: totalMonthlyBudget,
-          monthRemaining: totalRemaining,
-        })
-      } catch (error) {
-        console.error("Error fetching home data:", error)
-      } finally {
-        setLoading(false)
-      }
-    }
-
     fetchHomeData()
   }, [])
+
+  const handleDeleteTx = async (tx: any) => {
+    if (!window.confirm('确定删除这笔记录并退回预算吗？')) return;
+
+    try {
+      setDeletingId(tx.id);
+      
+      let tableName = "";
+      if (tx.budget_type === "daily_fixed") {
+        tableName = "daily_fixed_budgets";
+      } else if (tx.budget_type === "monthly_fixed") {
+        tableName = "monthly_fixed_budgets";
+      } else if (tx.budget_type === "monthly_elastic") {
+        tableName = "monthly_elastic_budgets";
+      }
+
+      if (tableName && tx.item_id) {
+        // Fetch current budget 
+        const { data: budgetData, error: fetchErr } = await supabase
+          .from(tableName)
+          .select('consumed, remaining')
+          .eq('id', tx.item_id)
+          .single();
+          
+        if (fetchErr) throw fetchErr;
+
+        const currentConsumed = Number(budgetData?.consumed || 0);
+        const currentRemaining = Number(budgetData?.remaining || 0);
+        const txAmount = Number(tx.amount || 0);
+
+        // Reverse logic: new_consumed = consumed - amount, new_remaining = remaining + amount
+        const newConsumed = currentConsumed - txAmount;
+        const newRemaining = currentRemaining + txAmount;
+
+        const { error: updateErr } = await supabase
+          .from(tableName)
+          .update({ consumed: newConsumed, remaining: newRemaining })
+          .eq('id', tx.item_id);
+
+        if (updateErr) throw updateErr;
+      }
+
+      // Delete the transaction
+      const { error: delErr } = await supabase
+        .from("transactions")
+        .delete()
+        .eq("id", tx.id);
+
+      if (delErr) throw delErr;
+
+      // Refresh
+      await fetchHomeData();
+    } catch (error: any) {
+      console.error("Error deleting transaction:", error);
+      alert("删除失败: " + (error?.message || "未知错误"));
+    } finally {
+      setDeletingId(null);
+    }
+  };
 
   if (loading) {
     return (
@@ -116,8 +229,8 @@ export default function Home() {
                 <span className="text-5xl font-extrabold text-gray-900 tracking-tight">
                   ¥{topOverview.todayAvailable.toFixed(2)}
                 </span>
-                <div className="mt-3 bg-gray-100 px-3 py-1 rounded-full text-sm font-medium text-gray-700 flex items-center gap-1">
-                  状态: {topOverview.todayStatus}
+                <div className={`mt-3 px-3 py-1 bg-gray-50 rounded-full text-sm font-medium flex items-center gap-1 ${topOverview.todayStatus.color}`}>
+                  状态: {topOverview.todayStatus.text}
                 </div>
               </div>
             </CardHeader>
@@ -212,9 +325,20 @@ export default function Home() {
                         </span>
                         <span className="text-xs text-gray-400">{tx.date}</span>
                       </div>
-                      <span className={`text-sm font-bold ${tx.amount && tx.amount < 0 ? 'text-red-500' : 'text-green-500'}`}>
-                        {tx.amount && tx.amount > 0 ? '+' : ''}{tx.amount?.toFixed(2)}
-                      </span>
+                      <div className="flex flex-col gap-1 items-end">
+                        <span className="text-sm font-bold text-gray-800">
+                          ¥ {Math.abs(tx.amount || 0).toFixed(2)}
+                        </span>
+                        <Button 
+                          variant="ghost" 
+                          size="sm" 
+                          className="h-6 px-2 text-xs text-red-500 hover:text-red-600 hover:bg-red-50"
+                          onClick={() => handleDeleteTx(tx)}
+                          disabled={deletingId === tx.id}
+                        >
+                          {deletingId === tx.id ? "删除中..." : "删除"}
+                        </Button>
+                      </div>
                     </div>
                   ))
                 )}
