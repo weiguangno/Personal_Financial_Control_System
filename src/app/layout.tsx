@@ -4,6 +4,11 @@ import "./globals.css";
 export const metadata: Metadata = {
   title: "Living Cost Pro",
   description: "Personal living cost tracking tool",
+  appleWebApp: {
+    capable: true,
+    statusBarStyle: "default",
+    title: "记账 Pro",
+  },
 };
 
 export default function RootLayout({
@@ -17,7 +22,7 @@ export default function RootLayout({
         <div className="flex-1 pb-16">
           {children}
         </div>
-        
+
         {/* Fixed Bottom Navigation */}
         <nav className="fixed bottom-0 left-0 right-0 h-16 bg-white border-t border-gray-200 flex items-center justify-around z-50 px-4 max-w-md mx-auto">
           <a href="/" className="flex flex-col items-center justify-center w-full h-full text-gray-600 hover:text-primary transition-colors">
