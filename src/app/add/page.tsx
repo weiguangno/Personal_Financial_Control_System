@@ -3,7 +3,7 @@
 import { useState, useEffect } from "react"
 import { useRouter } from "next/navigation"
 import { supabase } from "@/lib/supabase"
-import { cacheStore, CACHE_KEY_HOME } from "@/lib/cacheStore"
+import { cacheStore, CACHE_KEY_HOME, CACHE_KEY_ANALYSIS } from "@/lib/cacheStore"
 import { useSync } from "@/components/SyncProvider"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
@@ -72,6 +72,11 @@ export default function AddTransactionPage() {
           })))
         }
 
+        combinedItems.push({
+          id: 'monthly_elastic|99999999-9999-9999-9999-999999999999',
+          label: '每月弹性 | 其他'
+        })
+
         setBudgetItems(combinedItems)
       } catch (error) {
         console.error("Error fetching budget items:", error)
@@ -125,8 +130,8 @@ export default function AddTransactionPage() {
       }
 
       setSyncStatus("syncing")
-      // 2. 异步向 Supabase 插入数据，不阻塞 UI 线程
-      supabase
+      // 2. 异步向 Supabase 插入数据，阻塞 UI 线程直到确认落地以防止缓存竞态
+      const { error } = await supabase
         .from("transactions")
         .insert({
           id: newId,
@@ -136,15 +141,17 @@ export default function AddTransactionPage() {
           date: date,
           note: note || null,
         })
-        .then(({ error }) => {
-          if (error) {
-            console.error("Error saving transaction asynchronously:", error)
-            setSyncStatus("error")
-          } else {
-            setSyncStatus("synced")
-          }
-        })
-
+      
+      if (error) {
+        console.error("Error saving transaction asynchronously:", error)
+        setSyncStatus("error")
+        alert("保存失败: " + error.message)
+        setSaving(false)
+        return
+      }
+      
+      setSyncStatus("synced")
+      cacheStore.clearCache(CACHE_KEY_ANALYSIS)
       router.push("/")
     } catch (error: any) {
       console.error("Error saving transaction:", error)

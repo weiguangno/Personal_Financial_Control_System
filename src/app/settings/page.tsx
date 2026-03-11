@@ -8,7 +8,7 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { supabase } from "@/lib/supabase"
-import { cacheStore, CACHE_KEY_SETTINGS } from "@/lib/cacheStore"
+import { cacheStore, CACHE_KEY_SETTINGS, CACHE_KEY_HOME, CACHE_KEY_ANALYSIS } from "@/lib/cacheStore"
 import { useSync } from "@/components/SyncProvider"
 
 export default function SettingsPage() {
@@ -36,6 +36,50 @@ export default function SettingsPage() {
   const [newName, setNewName] = useState<string>("")
   const [newAmount, setNewAmount] = useState<string>("")
   const [isAdding, setIsAdding] = useState(false)
+
+  const [editingItem, setEditingItem] = useState<{id: string, type: string, name: string, amount: string} | null>(null);
+
+  const handleUpdateBudget = async (id: string, type: string, newName: string, newAmountStr: string) => {
+    if (!newName.trim() || !newAmountStr || isNaN(Number(newAmountStr))) {
+      alert("请输入有效的名称和金额")
+      return
+    }
+
+    const amountNum = Number(newAmountStr)
+    let tableName = ""
+    let updateData: any = { name: newName.trim() }
+
+    if (type === "daily_fixed") {
+      tableName = "daily_fixed_budgets"
+      updateData.daily_budget = amountNum
+    } else if (type === "monthly_fixed") {
+      tableName = "monthly_fixed_budgets"
+      updateData.monthly_budget = amountNum
+    } else if (type === "monthly_elastic") {
+      tableName = "monthly_elastic_budgets"
+      updateData.monthly_budget = amountNum
+    }
+
+    setSyncStatus("syncing")
+    const { error } = await supabase.from(tableName).update(updateData).eq("id", id)
+
+    if (error) {
+      console.error("Error updating budget", error)
+      setSyncStatus("error")
+      alert("更新失败: " + error.message)
+    } else {
+      console.log(
+        "%c[Settings Update Debug]", 
+        "background: #f59e0b; color: white; padding: 4px; border-radius: 4px;",
+        { Action: "Update Budget Category", ItemId: id, NewName: newName.trim(), NewAmount: amountNum, CachesCleared: true }
+      );
+      cacheStore.clearCache(CACHE_KEY_HOME)
+      cacheStore.clearCache(CACHE_KEY_ANALYSIS)
+      setSyncStatus("synced")
+      setEditingItem(null)
+      fetchAllData()
+    }
+  }
 
   const processAndSetSettingsData = (data: any) => {
     if (data.global) {
@@ -143,14 +187,15 @@ export default function SettingsPage() {
     cacheStore.setCache(CACHE_KEY_SETTINGS, cachedData)
 
     setSyncStatus("syncing")
-    supabase.from(tableName).insert(insertData).then(({ error }) => {
-      if (error) {
-        console.error("Error adding budget", error)
-        setSyncStatus("error")
-      } else {
-        setSyncStatus("synced")
-      }
-    })
+    const { error } = await supabase.from(tableName).insert(insertData)
+    if (error) {
+      console.error("Error adding budget", error)
+      setSyncStatus("error")
+    } else {
+      cacheStore.clearCache(CACHE_KEY_HOME)
+      cacheStore.clearCache(CACHE_KEY_ANALYSIS)
+      setSyncStatus("synced")
+    }
   }
 
   // Delete Budget Category
@@ -176,14 +221,15 @@ export default function SettingsPage() {
     cacheStore.setCache(CACHE_KEY_SETTINGS, cachedData)
 
     setSyncStatus("syncing")
-    supabase.from(tableName).delete().eq("id", id).then(({error}) => {
-      if (error) {
-        console.error("Error deleting budget", error)
-        setSyncStatus("error")
-      } else {
-        setSyncStatus("synced")
-      }
-    })
+    const { error } = await supabase.from(tableName).delete().eq("id", id)
+    if (error) {
+      console.error("Error deleting budget", error)
+      setSyncStatus("error")
+    } else {
+      cacheStore.clearCache(CACHE_KEY_HOME)
+      cacheStore.clearCache(CACHE_KEY_ANALYSIS)
+      setSyncStatus("synced")
+    }
   }
 
   // Update System Toggles
@@ -198,6 +244,9 @@ export default function SettingsPage() {
       cachedData.togglesRow = { id: togglesId || 1, toggles: newToggles }
     }
     cacheStore.setCache(CACHE_KEY_SETTINGS, cachedData)
+
+    cacheStore.clearCache(CACHE_KEY_HOME)
+    cacheStore.clearCache(CACHE_KEY_ANALYSIS)
 
     setSyncStatus("syncing")
     supabase
@@ -254,6 +303,8 @@ export default function SettingsPage() {
         setLoading(true);
         const { error } = await supabase.from('transactions').delete().neq('id', '00000000-0000-0000-0000-000000000000');
         if (error) throw error;
+        await supabase.from('monthly_balance_records').delete().neq('id', '00000000-0000-0000-0000-000000000000');
+        cacheStore.clearAllCache();
         alert('清空成功');
         window.location.reload();
       } catch (error: any) {
@@ -265,10 +316,19 @@ export default function SettingsPage() {
 
   const handleExportData = async () => {
     try {
-      const { data, error } = await supabase.from('transactions').select('*');
-      if (error) throw error;
+      const { data: txData, error: txError } = await supabase.from('transactions').select('*');
+      if (txError) throw txError;
+      
+      const { data: recordsData, error: recordsError } = await supabase.from('monthly_balance_records').select('*');
+      if (recordsError) throw recordsError;
 
-      const jsonStr = JSON.stringify(data, null, 2);
+      const exportObj = {
+        version: "1.1",
+        transactions: txData || [],
+        monthly_balance_records: recordsData || []
+      };
+
+      const jsonStr = JSON.stringify(exportObj, null, 2);
       const blob = new Blob([jsonStr], { type: 'application/json' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
@@ -297,20 +357,52 @@ export default function SettingsPage() {
         const text = await file.text();
         let data = JSON.parse(text);
 
-        if (!Array.isArray(data)) {
-          throw new Error("文件格式错误，应为 JSON 数组");
+        let txsToInsert: any[] = [];
+        let recordsToInsert: any[] = [];
+
+        if (Array.isArray(data)) {
+          // 旧版格式直接是一个流水数组
+          txsToInsert = data.map((item: any) => {
+            const { id, ...rest } = item;
+            return rest;
+          });
+        } else if (data && typeof data === "object") {
+          // 新版格式包含了多张表的数据
+          if (Array.isArray(data.transactions)) {
+            txsToInsert = data.transactions.map((item: any) => {
+              const { id, ...rest } = item;
+              return rest;
+            });
+          }
+          if (Array.isArray(data.monthly_balance_records)) {
+            recordsToInsert = data.monthly_balance_records.map((item: any) => {
+              const { id, ...rest } = item;
+              return rest;
+            });
+          }
+        } else {
+          throw new Error("文件格式错误，不支持的 JSON 结构");
         }
 
-        // 剔除原来的 id，让 supabase 自己生成新的，防止主键冲突
-        data = data.map((item: any) => {
-          const { id, ...rest } = item;
-          return rest;
-        });
+        if (txsToInsert.length > 0) {
+          const { error: txError } = await supabase.from('transactions').insert(txsToInsert);
+          if (txError) throw txError;
+        }
 
-        const { error } = await supabase.from('transactions').insert(data);
-        if (error) throw error;
+        if (recordsToInsert.length > 0) {
+          // 导入包含已存在的月度记录
+          const { error: recordsError } = await supabase.from('monthly_balance_records').insert(recordsToInsert);
+          if (recordsError) throw recordsError;
+        }
 
-        alert("导入成功");
+        // 如果旧版数据导入时没有任何月度快照，那还是需要重建的
+        if (recordsToInsert.length === 0 && txsToInsert.length > 0) {
+          await rebuildAllMonthlyBalances();
+        }
+
+        cacheStore.clearAllCache();
+
+        alert("导入成功！");
         window.location.reload();
       } catch (error: any) {
         alert("导入失败: " + (error?.message || "未知错误"));
@@ -319,6 +411,100 @@ export default function SettingsPage() {
     };
     input.click();
   }
+
+  const rebuildAllMonthlyBalances = async () => {
+    try {
+      // 1. Fetch existing records to preserve manual overrides
+      const { data: existingRecords } = await supabase.from('monthly_balance_records').select('*').neq('id', '00000000-0000-0000-0000-000000000000');
+      const recordsMap = new Map();
+      if (existingRecords) {
+        existingRecords.forEach(r => {
+          recordsMap.set(`${r.year}-${String(r.month).padStart(2, '0')}`, r);
+        });
+      }
+
+      // 2. Fetch all txs
+      const { data: allTxs } = await supabase.from('transactions').select('amount, date');
+      if (!allTxs || allTxs.length === 0) return;
+
+      // Group by YYYY-MM
+      const monthlyData: Record<string, number> = {};
+      allTxs.forEach((tx: any) => {
+        const amt = Number(tx.amount);
+        if (amt < 0) {
+          const dt = new Date(tx.date);
+          const key = `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}`;
+          monthlyData[key] = (monthlyData[key] || 0) + Math.abs(amt);
+        }
+      });
+
+      const { data: globalData } = await supabase.from("global_settings").select("*").limit(1).maybeSingle();
+      const { data: togglesData } = await supabase.from("system_toggles").select("*").limit(1).maybeSingle();
+      const ds_toggles = (togglesData as any)?.toggles || {};
+      const deduct_saving = !!ds_toggles.deduct_saving_goal;
+      const current_raw_budget = Number(globalData?.monthly_budget || 0);
+      const current_saving_goal = Number(globalData?.saving_goal || 0);
+
+      const keys = Object.keys(monthlyData).sort();
+      
+      const today = new Date();
+      const currentMonthKey = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}`;
+
+      let currentCumulative = 0;
+      const recordsToUpsert = [];
+
+      for (const k of keys) {
+        if (k >= currentMonthKey) continue; // Skip current and future months
+
+        const [yStr, mStr] = k.split('-');
+        const y = parseInt(yStr, 10);
+        const m = parseInt(mStr, 10);
+        const consumed = monthlyData[k];
+        
+        let monthGlobalBudget = current_raw_budget;
+        let monthSavingGoal = current_saving_goal;
+        
+        const existingRecord = recordsMap.get(k);
+        let recordId = crypto.randomUUID();
+        
+        // Preserve historical budget values if they exist
+        if (existingRecord) {
+            recordId = existingRecord.id;
+            if (existingRecord.global_monthly_budget !== null && existingRecord.global_monthly_budget !== undefined) {
+                monthGlobalBudget = Number(existingRecord.global_monthly_budget);
+            }
+            if (existingRecord.saving_goal !== null && existingRecord.saving_goal !== undefined) {
+                monthSavingGoal = Number(existingRecord.saving_goal);
+            }
+        }
+
+        const monthBudget = deduct_saving ? Math.max(0, monthGlobalBudget - monthSavingGoal) : monthGlobalBudget;
+        const balance = monthBudget - consumed;
+        currentCumulative += balance;
+
+        recordsToUpsert.push({
+          id: recordId,
+          year: y,
+          month: m,
+          global_monthly_budget: monthGlobalBudget,
+          saving_goal: monthSavingGoal,
+          monthly_budget: monthBudget,
+          monthly_actual_consumed: consumed,
+          monthly_balance: balance,
+          cumulative_balance: currentCumulative
+        });
+      }
+
+      // Upsert the newly calculated records
+      if (recordsToUpsert.length > 0) {
+        await supabase.from('monthly_balance_records').upsert(recordsToUpsert);
+      }
+      
+      // Clean up old records that are no longer valid (e.g. months with no transactions anymore, but usually we just keep them or delete non-upserted ones. For safety, we keep them or just leave as is, but it's better to not blindly delete).
+    } catch (e) {
+      console.error("Error rebuilding balances:", e);
+    }
+  };
 
   if (loading) {
     return (
@@ -415,31 +601,106 @@ export default function SettingsPage() {
               <div className="divide-y divide-gray-50">
                 {dailyBudgets.map(item => (
                   <div key={item.id} className="p-4 flex justify-between items-center">
-                    <div>
-                      <div className="font-medium text-sm text-gray-800">{item.name} <span className="text-xs text-gray-400 font-normal ml-1">(每日固定)</span></div>
-                      <div className="text-xs text-gray-500 mt-0.5">基础预算: ¥{item.daily_budget}</div>
-                    </div>
-                    <Button variant="ghost" size="sm" onClick={() => handleDeleteBudget(item.id, "daily_fixed")} className="h-7 text-xs px-2 text-red-500 hover:text-red-600 bg-red-50/50 hover:bg-red-50">删除</Button>
+                    {editingItem?.id === item.id ? (
+                      <div className="flex gap-2 w-full">
+                        <Input
+                          value={editingItem.name}
+                          onChange={e => setEditingItem(prev => prev ? {...prev, name: e.target.value} : null)}
+                          className="flex-1 bg-white h-8 text-sm"
+                        />
+                        <Input
+                          type="number"
+                          value={editingItem.amount}
+                          onChange={e => setEditingItem(prev => prev ? {...prev, amount: e.target.value} : null)}
+                          className="w-20 bg-white h-8 text-sm px-2"
+                        />
+                        <div className="flex gap-1 shrink-0">
+                          <Button size="sm" className="h-8 px-3" onClick={() => handleUpdateBudget(item.id, "daily_fixed", editingItem?.name || '', editingItem?.amount || '')}>保存</Button>
+                          <Button size="sm" variant="outline" className="h-8 px-3" onClick={() => setEditingItem(null)}>取消</Button>
+                        </div>
+                      </div>
+                    ) : (
+                      <>
+                        <div className="flex-1">
+                          <div className="font-medium text-sm text-gray-800">{item.name} <span className="text-xs text-gray-400 font-normal ml-1">(每日固定)</span></div>
+                          <div className="text-xs text-gray-500 mt-0.5">基础预算: ¥{item.daily_budget}</div>
+                        </div>
+                        <div className="flex gap-2 shrink-0">
+                          <Button variant="ghost" size="sm" onClick={() => setEditingItem({id: item.id, type: "daily_fixed", name: item.name || '', amount: String(item.daily_budget)})} className="h-7 text-xs px-2 text-blue-500 hover:text-blue-600 bg-blue-50/50 hover:bg-blue-50">编辑</Button>
+                          <Button variant="ghost" size="sm" onClick={() => handleDeleteBudget(item.id, "daily_fixed")} className="h-7 text-xs px-2 text-red-500 hover:text-red-600 bg-red-50/50 hover:bg-red-50">删除</Button>
+                        </div>
+                      </>
+                    )}
                   </div>
                 ))}
 
                 {monthlyFixedBudgets.map(item => (
                   <div key={item.id} className="p-4 flex justify-between items-center">
-                    <div>
-                      <div className="font-medium text-sm text-gray-800">{item.name} <span className="text-xs text-gray-400 font-normal ml-1">(每月固定)</span></div>
-                      <div className="text-xs text-gray-500 mt-0.5">基础预算: ¥{item.monthly_budget}</div>
-                    </div>
-                    <Button variant="ghost" size="sm" onClick={() => handleDeleteBudget(item.id, "monthly_fixed")} className="h-7 text-xs px-2 text-red-500 hover:text-red-600 bg-red-50/50 hover:bg-red-50">删除</Button>
+                    {editingItem?.id === item.id ? (
+                      <div className="flex gap-2 w-full">
+                        <Input
+                          value={editingItem.name}
+                          onChange={e => setEditingItem(prev => prev ? {...prev, name: e.target.value} : null)}
+                          className="flex-1 bg-white h-8 text-sm"
+                        />
+                        <Input
+                          type="number"
+                          value={editingItem.amount}
+                          onChange={e => setEditingItem(prev => prev ? {...prev, amount: e.target.value} : null)}
+                          className="w-20 bg-white h-8 text-sm px-2"
+                        />
+                        <div className="flex gap-1 shrink-0">
+                          <Button size="sm" className="h-8 px-3" onClick={() => handleUpdateBudget(item.id, "monthly_fixed", editingItem?.name || '', editingItem?.amount || '')}>保存</Button>
+                          <Button size="sm" variant="outline" className="h-8 px-3" onClick={() => setEditingItem(null)}>取消</Button>
+                        </div>
+                      </div>
+                    ) : (
+                      <>
+                        <div className="flex-1">
+                          <div className="font-medium text-sm text-gray-800">{item.name} <span className="text-xs text-gray-400 font-normal ml-1">(每月固定)</span></div>
+                          <div className="text-xs text-gray-500 mt-0.5">基础预算: ¥{item.monthly_budget}</div>
+                        </div>
+                        <div className="flex gap-2 shrink-0">
+                          <Button variant="ghost" size="sm" onClick={() => setEditingItem({id: item.id, type: "monthly_fixed", name: item.name || '', amount: String(item.monthly_budget)})} className="h-7 text-xs px-2 text-blue-500 hover:text-blue-600 bg-blue-50/50 hover:bg-blue-50">编辑</Button>
+                          <Button variant="ghost" size="sm" onClick={() => handleDeleteBudget(item.id, "monthly_fixed")} className="h-7 text-xs px-2 text-red-500 hover:text-red-600 bg-red-50/50 hover:bg-red-50">删除</Button>
+                        </div>
+                      </>
+                    )}
                   </div>
                 ))}
 
-                {monthlyElasticBudgets.map(item => (
+                {monthlyElasticBudgets.filter(item => item.id !== '99999999-9999-9999-9999-999999999999' && item.name !== '其他').map(item => (
                   <div key={item.id} className="p-4 flex justify-between items-center">
-                    <div>
-                      <div className="font-medium text-sm text-gray-800">{item.name} <span className="text-xs text-gray-400 font-normal ml-1">(每月弹性)</span></div>
-                      <div className="text-xs text-gray-500 mt-0.5">基础预算: ¥{item.monthly_budget}</div>
-                    </div>
-                    <Button variant="ghost" size="sm" onClick={() => handleDeleteBudget(item.id, "monthly_elastic")} className="h-7 text-xs px-2 text-red-500 hover:text-red-600 bg-red-50/50 hover:bg-red-50">删除</Button>
+                    {editingItem?.id === item.id ? (
+                      <div className="flex gap-2 w-full">
+                        <Input
+                          value={editingItem.name}
+                          onChange={e => setEditingItem(prev => prev ? {...prev, name: e.target.value} : null)}
+                          className="flex-1 bg-white h-8 text-sm"
+                        />
+                        <Input
+                          type="number"
+                          value={editingItem.amount}
+                          onChange={e => setEditingItem(prev => prev ? {...prev, amount: e.target.value} : null)}
+                          className="w-20 bg-white h-8 text-sm px-2"
+                        />
+                        <div className="flex gap-1 shrink-0">
+                          <Button size="sm" className="h-8 px-3" onClick={() => handleUpdateBudget(item.id, "monthly_elastic", editingItem?.name || '', editingItem?.amount || '')}>保存</Button>
+                          <Button size="sm" variant="outline" className="h-8 px-3" onClick={() => setEditingItem(null)}>取消</Button>
+                        </div>
+                      </div>
+                    ) : (
+                      <>
+                        <div className="flex-1">
+                          <div className="font-medium text-sm text-gray-800">{item.name} <span className="text-xs text-gray-400 font-normal ml-1">(每月弹性)</span></div>
+                          <div className="text-xs text-gray-500 mt-0.5">基础预算: ¥{item.monthly_budget}</div>
+                        </div>
+                        <div className="flex gap-2 shrink-0">
+                          <Button variant="ghost" size="sm" onClick={() => setEditingItem({id: item.id, type: "monthly_elastic", name: item.name || '', amount: String(item.monthly_budget)})} className="h-7 text-xs px-2 text-blue-500 hover:text-blue-600 bg-blue-50/50 hover:bg-blue-50">编辑</Button>
+                          <Button variant="ghost" size="sm" onClick={() => handleDeleteBudget(item.id, "monthly_elastic")} className="h-7 text-xs px-2 text-red-500 hover:text-red-600 bg-red-50/50 hover:bg-red-50">删除</Button>
+                        </div>
+                      </>
+                    )}
                   </div>
                 ))}
 
@@ -456,7 +717,7 @@ export default function SettingsPage() {
           <Card className="border-0 shadow-sm">
             <CardHeader className="pb-3 border-b border-gray-50">
               <CardTitle className="text-sm font-medium">系统开关配置</CardTitle>
-              <CardDescription className="text-xs">共 4 项核心预算与规则控制</CardDescription>
+              <CardDescription className="text-xs">共 3 项核心预算与规则控制</CardDescription>
             </CardHeader>
             <CardContent className="pt-0 pb-2 px-0 divide-y divide-gray-50">
 
@@ -464,17 +725,38 @@ export default function SettingsPage() {
               <div className="p-4 space-y-4">
                 <div className="flex items-center justify-between">
                   <div className="space-y-0.5 pr-4">
-                    <Label className="text-sm font-medium text-gray-800">每日预算结转</Label>
-                    <p className="text-xs text-gray-500">每日未用完金额是否结转</p>
+                    <Label className="text-sm font-medium text-gray-800">每日结余流转方式</Label>
+                    <p className="text-xs text-gray-500">
+                      {toggles.overflow_to_flexible ? "已转入弹性池：每日未用完金额会增加本月弹性可用预算" : "已结转至次日：每日未用完金额会累加到次日的固定可用额度中"}
+                    </p>
                   </div>
-                  <Switch checked={!!toggles.rollover_daily} onCheckedChange={async (c) => handleToggleChange("rollover_daily", c)} />
-                </div>
-                <div className="flex items-center justify-between">
-                  <div className="space-y-0.5 pr-4">
-                    <Label className="text-sm font-medium text-gray-800">差额转弹性池</Label>
-                    <p className="text-xs text-gray-500">固定预算差额是否进入每月弹性池</p>
-                  </div>
-                  <Switch checked={!!toggles.overflow_to_flexible} onCheckedChange={async (c) => handleToggleChange("overflow_to_flexible", c)} />
+                  <Switch 
+                    checked={!!toggles.overflow_to_flexible} 
+                    onCheckedChange={async (c) => {
+                      const newToggles = { ...toggles, overflow_to_flexible: c, rollover_daily: !c };
+                      setToggles(newToggles);
+
+                      const cachedData = cacheStore.getCache<any>(CACHE_KEY_SETTINGS) || {}
+                      if (cachedData.togglesRow) {
+                        cachedData.togglesRow.toggles = newToggles
+                      } else {
+                        cachedData.togglesRow = { id: togglesId || 1, toggles: newToggles }
+                      }
+                      cacheStore.setCache(CACHE_KEY_SETTINGS, cachedData)
+
+                      cacheStore.clearCache(CACHE_KEY_HOME)
+                      cacheStore.clearCache(CACHE_KEY_ANALYSIS)
+
+                      setSyncStatus("syncing")
+                      const { error } = await supabase.from('system_toggles').upsert({ id: togglesId || 1, toggles: newToggles })
+                      if (error) {
+                        console.error("Error updating toggles", error)
+                        setSyncStatus("error")
+                      } else {
+                        setSyncStatus("synced")
+                      }
+                    }} 
+                  />
                 </div>
                 <div className="flex items-center justify-between">
                   <div className="space-y-0.5 pr-4">

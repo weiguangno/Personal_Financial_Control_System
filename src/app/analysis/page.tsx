@@ -42,6 +42,8 @@ type BalanceRecordRow = {
   id?: string
   year: number
   month: number
+  global_monthly_budget?: number | null
+  saving_goal?: number | null
   monthly_budget?: number | null
   monthly_actual_consumed?: number | null
   monthly_balance?: number | null
@@ -190,7 +192,11 @@ export default function AnalysisPage() {
       const toggles = data.toggles || {}
       const global = data.global || {}
 
-      setBalanceRecords(balanceData)
+      const validBalanceData = balanceData.filter(
+        (record) => toNumber(record.monthly_budget) > 0 || toNumber(record.monthly_actual_consumed) > 0
+      )
+      
+      setBalanceRecords(validBalanceData)
 
       const monthTransactions = transactions.filter(
         (tx) => tx.date && tx.date.startsWith(currentMonthStr)
@@ -302,24 +308,62 @@ export default function AnalysisPage() {
         .filter((tx) => tx.budget_type === "monthly_elastic" && toNumber(tx.amount) < 0)
         .reduce((sum, tx) => sum + Math.abs(toNumber(tx.amount)), 0)
 
-      const elasticName =
-        monthlyElasticData.length > 0
-          ? monthlyElasticData[0]?.name || "其他"
-          : "其他"
+      // 处理实体弹性条目
+      let userDefinedElasticBudgetsTotal = 0;
+      const userDefinedElasticItems: ProgressItem[] = monthlyElasticData.map((item) => {
+        const itemBudget = toNumber(item.monthly_budget);
+        userDefinedElasticBudgetsTotal += itemBudget;
 
-      const monthlyElasticProgressItems: ProgressItem[] = [
+        const consumed = monthTransactions
+          .filter(
+            (tx) =>
+              tx.budget_type === "monthly_elastic" &&
+              tx.item_id === item.id &&
+              toNumber(tx.amount) < 0
+          )
+          .reduce((sum, tx) => sum + Math.abs(toNumber(tx.amount)), 0);
+
+        const remaining = clampMinZero(itemBudget - consumed);
+        const percent = itemBudget > 0 ? (consumed / itemBudget) * 100 : 0;
+
+        return {
+          id: item.id,
+          name: item.name || "未命名",
+          budget: itemBudget,
+          consumed,
+          remaining,
+          percent,
+        };
+      });
+
+      // 计算虚拟的“其他”条目
+      const otherBudget = Math.max(0, totalFlexibleBudget - userDefinedElasticBudgetsTotal);
+      const otherConsumed = monthTransactions
+        .filter((tx) => tx.budget_type === "monthly_elastic" && tx.item_id === "99999999-9999-9999-9999-999999999999" && toNumber(tx.amount) < 0)
+        .reduce((sum, tx) => sum + Math.abs(toNumber(tx.amount)), 0);
+
+      const otherItem: ProgressItem = {
+        id: "99999999-9999-9999-9999-999999999999",
+        name: "其他",
+        budget: otherBudget,
+        consumed: otherConsumed,
+        remaining: clampMinZero(otherBudget - otherConsumed),
+        percent: otherBudget > 0 ? (otherConsumed / otherBudget) * 100 : 0,
+      };
+
+      const monthlyElasticProgressItems: ProgressItem[] = [...userDefinedElasticItems, otherItem];
+
+      console.log(
+        "%c[Elastic Budget Debug]", 
+        "background: #4f46e5; color: white; padding: 4px; border-radius: 4px;",
         {
-          id: monthlyElasticData[0]?.id || "monthly-elastic-other",
-          name: elasticName,
-          budget: totalFlexibleBudget,
-          consumed: monthlyElasticConsumed,
-          remaining: clampMinZero(totalFlexibleBudget - monthlyElasticConsumed),
-          percent:
-            totalFlexibleBudget > 0
-              ? (monthlyElasticConsumed / totalFlexibleBudget) * 100
-              : 0,
-        },
-      ]
+          TotalFlexibleBudget: totalFlexibleBudget,
+          UserDefinedItemsSum: userDefinedElasticBudgetsTotal,
+          CalculatedOtherBudget: otherBudget,
+          OtherConsumed: otherConsumed,
+          RenderedItemsCount: monthlyElasticProgressItems.length
+        }
+      );
 
       setDailyBudgets(dailyProgressItems)
       setMonthlyFixedBudgets(monthlyFixedProgressItems)
@@ -494,6 +538,108 @@ export default function AnalysisPage() {
     overallEvaluation = "当前本月还没有消费记录，预算状态正常。"
   }
 
+  const [editingRecord, setEditingRecord] = useState<{ id: string, globalBudget: string, savingGoal: string } | null>(null);
+
+  const handleSaveRecord = async (record: BalanceRecordRow) => {
+    if (!editingRecord) return;
+    const newGlobalBudget = Number(editingRecord.globalBudget);
+    const newSavingGoal = Number(editingRecord.savingGoal);
+
+    if (isNaN(newGlobalBudget) || isNaN(newSavingGoal)) {
+      alert("请输入有效的数字");
+      return;
+    }
+
+    try {
+      setSyncStatus("syncing");
+
+      // 1. Fetch all records from the current one onwards to cascade the cumulative balance
+      const { data: futureRecords, error: fetchError } = await supabase
+        .from('monthly_balance_records')
+        .select('*')
+        .gte('year', record.year)
+        .order('year', { ascending: true })
+        .order('month', { ascending: true });
+
+      if (fetchError) throw fetchError;
+
+      // Also need the immediate previous record to get the starting cumulative balance
+      let prevCumulative = 0;
+      let prevMonth = record.month - 1;
+      let prevYear = record.year;
+      if (prevMonth === 0) {
+        prevMonth = 12;
+        prevYear -= 1;
+      }
+
+      const { data: prevRecord } = await supabase
+        .from('monthly_balance_records')
+        .select('cumulative_balance')
+        .eq('year', prevYear)
+        .eq('month', prevMonth)
+        .maybeSingle();
+
+      if (prevRecord) {
+        prevCumulative = toNumber(prevRecord.cumulative_balance);
+      }
+
+      const { data: togglesData } = await supabase.from("system_toggles").select("*").limit(1).maybeSingle();
+      const ds_toggles = (togglesData as any)?.toggles || {};
+      const deduct_saving = !!ds_toggles.deduct_saving_goal;
+
+      const recordsToUpsert = [];
+      let currentCumulative = prevCumulative;
+
+      // Process future records chronologically
+      if (futureRecords) {
+        // Filter out records that are somehow before the current one (due to gte year only)
+        const relevantRecords = futureRecords.filter(r => 
+          r.year > record.year || (r.year === record.year && r.month >= record.month)
+        );
+
+        for (const r of relevantRecords) {
+          let rGlobalBudget = toNumber(r.global_monthly_budget);
+          let rSavingGoal = toNumber(r.saving_goal);
+
+          // Apply new values to the target record being edited
+          if (r.id === record.id) {
+            rGlobalBudget = newGlobalBudget;
+            rSavingGoal = newSavingGoal;
+          }
+
+          const rMonthBudget = deduct_saving ? Math.max(0, rGlobalBudget - rSavingGoal) : rGlobalBudget;
+          const rConsumed = toNumber(r.monthly_actual_consumed);
+          const rBalance = rMonthBudget - rConsumed;
+          
+          currentCumulative += rBalance;
+
+          recordsToUpsert.push({
+            ...r,
+            global_monthly_budget: rGlobalBudget,
+            saving_goal: rSavingGoal,
+            monthly_budget: rMonthBudget,
+            monthly_balance: rBalance,
+            cumulative_balance: currentCumulative
+          });
+        }
+      }
+
+      if (recordsToUpsert.length > 0) {
+        const { error: upsertError } = await supabase.from('monthly_balance_records').upsert(recordsToUpsert);
+        if (upsertError) throw upsertError;
+      }
+
+      cacheStore.clearCache(CACHE_KEY_ANALYSIS);
+      setSyncStatus("synced");
+      setEditingRecord(null);
+      fetchData();
+    } catch (error: any) {
+      console.error("Error updating record:", error);
+      alert("保存失败: " + (error?.message || "未知错误"));
+      setSyncStatus("error");
+    }
+  };
+
   if (loading) {
     return (
       <main className="min-h-screen bg-gray-50 flex items-center justify-center pb-24">
@@ -648,25 +794,98 @@ export default function AnalysisPage() {
                 ) : (
                   balanceRecords.map((record) => {
                     const monthKey = `${record.year}-${String(record.month).padStart(2, "0")}`
+                    const globalBudget = toNumber(record.global_monthly_budget)
+                    const savingGoal = toNumber(record.saving_goal)
                     const budget = toNumber(record.monthly_budget)
                     const consumed = toNumber(record.monthly_actual_consumed)
                     const balance = toNumber(record.monthly_balance)
                     const cumulative = toNumber(record.cumulative_balance)
+                    const isEditing = editingRecord?.id === record.id;
 
                     return (
-                      <div key={record.id || monthKey} className="p-4 flex flex-col gap-2">
-                        <div className="flex justify-between items-center">
+                      <div key={record.id || monthKey} className="p-4 flex flex-col gap-3">
+                        <div className="flex justify-between items-center border-b border-gray-100 pb-2">
                           <span className="font-semibold text-gray-800">{monthKey}</span>
-                          <span className="text-sm font-medium text-green-600">
-                            累计: ¥{cumulative.toFixed(2)}
+                          <span className="text-sm font-bold text-green-600">
+                            累计结余: ¥{cumulative.toFixed(2)}
                           </span>
                         </div>
-                        <div className="flex justify-between text-xs text-gray-500">
-                          <span>
-                            预算: ¥{budget.toFixed(2)} / 消费: ¥{consumed.toFixed(2)}
-                          </span>
-                          <span className={balance >= 0 ? "text-green-500" : "text-red-500"}>
-                            结余: {balance > 0 ? "+" : ""}
+                        
+                        {isEditing ? (
+                          <div className="flex flex-col gap-2 bg-blue-50/50 p-3 rounded border border-blue-100">
+                            <div className="text-xs font-medium text-blue-800 mb-1">编辑基础设定</div>
+                            <div className="grid grid-cols-2 gap-3">
+                              <div className="flex flex-col gap-1.5">
+                                <label className="text-[10px] text-gray-500 uppercase tracking-wider">月预算总额 (¥)</label>
+                                <input 
+                                  type="number" 
+                                  className="w-full h-8 px-2 text-sm border border-gray-200 rounded focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-none transition-all"
+                                  value={editingRecord?.globalBudget || ""}
+                                  onChange={e => {
+                                    if (editingRecord) {
+                                      setEditingRecord({...editingRecord, globalBudget: e.target.value});
+                                    }
+                                  }}
+                                />
+                              </div>
+                              <div className="flex flex-col gap-1.5">
+                                <label className="text-[10px] text-gray-500 uppercase tracking-wider">每月储蓄目标 (¥)</label>
+                                <input 
+                                  type="number" 
+                                  className="w-full h-8 px-2 text-sm border border-gray-200 rounded focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-none transition-all"
+                                  value={editingRecord?.savingGoal || ""}
+                                  onChange={e => {
+                                    if (editingRecord) {
+                                      setEditingRecord({...editingRecord, savingGoal: e.target.value});
+                                    }
+                                  }}
+                                />
+                              </div>
+                            </div>
+                            <div className="flex justify-end gap-2 mt-2">
+                              <button 
+                                onClick={() => setEditingRecord(null)}
+                                className="px-3 py-1 text-xs text-gray-500 bg-white border border-gray-200 rounded hover:bg-gray-50 transition-colors"
+                              >
+                                取消
+                              </button>
+                              <button 
+                                onClick={() => handleSaveRecord(record)}
+                                className="px-3 py-1 text-xs text-white bg-blue-500 rounded hover:bg-blue-600 transition-colors"
+                              >
+                                保存
+                              </button>
+                            </div>
+                          </div>
+                        ) : (
+                          <div className="grid grid-cols-2 gap-2 text-xs">
+                            <div 
+                              className="flex flex-col gap-1 bg-gray-50 p-2 rounded cursor-pointer hover:bg-blue-50 transition-colors group relative"
+                              onClick={() => setEditingRecord({ id: record.id!, globalBudget: String(globalBudget), savingGoal: String(savingGoal) })}
+                            >
+                              <div className="flex justify-between items-center">
+                                <span className="text-gray-500">月预算总额 / 每月储蓄目标</span>
+                                <span className="text-[10px] text-blue-500 opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-1 bg-blue-100 px-1.5 py-0.5 rounded leading-none pt-1">
+                                  ✎ 修改
+                                </span>
+                              </div>
+                              <span className="font-medium text-gray-700">
+                                ¥{globalBudget.toFixed(2)} / ¥{savingGoal.toFixed(2)}
+                              </span>
+                            </div>
+                            
+                            <div className="flex flex-col gap-1 bg-gray-50 p-2 rounded">
+                              <span className="text-gray-500">本月总预算 / 本月总消费</span>
+                              <span className="font-medium text-gray-700">
+                                ¥{budget.toFixed(2)} / ¥{consumed.toFixed(2)}
+                              </span>
+                            </div>
+                          </div>
+                        )}
+
+                        <div className="flex justify-end text-xs font-medium">
+                          <span className={balance >= 0 ? "text-green-500 bg-green-50 px-2 py-0.5 rounded" : "text-red-500 bg-red-50 px-2 py-0.5 rounded"}>
+                            本月结余: {balance > 0 ? "+" : ""}
                             {balance.toFixed(2)}
                           </span>
                         </div>

@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { supabase } from "@/lib/supabase"
-import { cacheStore, CACHE_KEY_HOME } from "@/lib/cacheStore"
+import { cacheStore, CACHE_KEY_HOME, CACHE_KEY_ANALYSIS } from "@/lib/cacheStore"
 import { useSync } from "@/components/SyncProvider"
 
 type BudgetType = "daily_fixed" | "monthly_fixed" | "monthly_elastic"
@@ -139,16 +139,17 @@ export default function Home() {
 
     setRecentTransactions(transactions.slice(0, 5))
 
-    // 计算所有消费（已取绝对值兼容）
-    const allConsumed = transactions.reduce((sum, tx) => {
+    const currentMonthTransactions = transactions.filter(
+      (tx) => tx.date && tx.date.startsWith(currentMonthStr)
+    )
+
+    // 计算当月消费（已取绝对值兼容）
+    const allConsumed = currentMonthTransactions.reduce((sum, tx) => {
       return sum + Math.abs(toNumber(tx.amount))
     }, 0)
     setTotalConsumed(allConsumed)
 
     const todayTransactions = transactions.filter((tx) => tx.date === todayStr)
-    const currentMonthTransactions = transactions.filter(
-      (tx) => tx.date && tx.date.startsWith(currentMonthStr)
-    )
 
     // 1. 基础计算
     const dailyFixedTotal = dailyRows.reduce((sum, item) => sum + toNumber(item.daily_budget), 0)
@@ -349,17 +350,132 @@ export default function Home() {
     })
 
     setTopOverview({
-      todayAvailable: today_allowance,
+      todayAvailable: today_allowance - todayConsumedForStatus,
       todayStatus: { text: todayStatusText, color: todayStatusColor },
       monthRemaining,
       monthBalance,
       monthlyBudget: globalMonthlyBudget,
     })
 
-    if (monthlyElasticRows.length > 1) {
-      console.warn("monthly_elastic_budgets 表中检测到多条记录。按你的规则建议仅保留 1 条“其他”记录。")
-    }
   }
+
+  const checkAndSettleLastMonth = async () => {
+    try {
+      const today = new Date();
+      const lastMonthDate = new Date(today.getFullYear(), today.getMonth() - 1, 1);
+      const lastMonthYear = lastMonthDate.getFullYear();
+      const lastMonth = lastMonthDate.getMonth() + 1; // 1-12
+
+      const lastMonthStartStr = `${lastMonthYear}-${String(lastMonth).padStart(2, '0')}-01`;
+      const endOfLastMonth = new Date(today.getFullYear(), today.getMonth(), 0);
+      const lastMonthEndStr = `${lastMonthYear}-${String(lastMonth).padStart(2, '0')}-${String(endOfLastMonth.getDate()).padStart(2, '0')}T23:59:59.999Z`;
+
+      // Previous month cumulative balance
+      const prevMonthDate = new Date(lastMonthYear, lastMonth - 2, 1);
+      const prevYear = prevMonthDate.getFullYear();
+      const prevMonth = prevMonthDate.getMonth() + 1;
+
+      // Group inquiries into Promise.all to reduce waterfall delays
+      const [
+        { data: existingRecord },
+        { data: globalData },
+        { data: togglesData },
+        { data: txData },
+        { data: prevRecord }
+      ] = await Promise.all([
+        supabase
+          .from("monthly_balance_records")
+          .select("id, monthly_actual_consumed")
+          .eq("year", lastMonthYear)
+          .eq("month", lastMonth)
+          .maybeSingle(),
+        supabase.from("global_settings").select("*").limit(1).maybeSingle(),
+        supabase.from("system_toggles").select("*").limit(1).maybeSingle(),
+        supabase
+          .from("transactions")
+          .select("amount")
+          .gte("date", lastMonthStartStr)
+          .lte("date", lastMonthEndStr),
+        supabase
+          .from("monthly_balance_records")
+          .select("cumulative_balance")
+          .eq("year", prevYear)
+          .eq("month", prevMonth)
+          .maybeSingle()
+      ]);
+
+      const ds_toggles = (togglesData as SystemTogglesRow)?.toggles || {};
+      const deduct_saving = !!ds_toggles.deduct_saving_goal;
+
+      const raw_budget = toNumber(globalData?.monthly_budget);
+      const saving_goal = toNumber(globalData?.saving_goal);
+      const calculatedBudget = deduct_saving ? Math.max(0, raw_budget - saving_goal) : raw_budget;
+
+      const txRows = txData || [];
+      const lastMonthConsumed = txRows
+        .filter(tx => toNumber(tx.amount) < 0)
+        .reduce((sum, tx) => sum + Math.abs(toNumber(tx.amount)), 0);
+
+      const previous_cumulative = prevRecord ? toNumber(prevRecord.cumulative_balance) : 0;
+      const monthly_balance = calculatedBudget - lastMonthConsumed;
+      const cumulative_balance = previous_cumulative + monthly_balance;
+
+      if (existingRecord) {
+        if (Math.abs(toNumber(existingRecord.monthly_actual_consumed) - lastMonthConsumed) < 0.01) {
+          return; // No differences, return silently
+        }
+
+        const updateRecord = {
+          global_monthly_budget: raw_budget,
+          saving_goal: saving_goal,
+          monthly_budget: calculatedBudget,
+          monthly_actual_consumed: lastMonthConsumed,
+          monthly_balance: monthly_balance,
+          cumulative_balance: cumulative_balance
+        };
+
+        const { error: updateError } = await supabase
+          .from("monthly_balance_records")
+          .update(updateRecord)
+          .eq("id", existingRecord.id);
+
+        if (!updateError) {
+          cacheStore.clearCache(CACHE_KEY_ANALYSIS);
+          console.log(
+            "%c[Monthly Settlement Debug]", 
+            "background: #8b5cf6; color: white; padding: 4px; border-radius: 4px;",
+            { Action: "Updated", SettledYear: lastMonthYear, SettledMonth: lastMonth, global: raw_budget, saving: saving_goal, Budget: calculatedBudget, Consumed: lastMonthConsumed, Balance: monthly_balance, Cumulative: cumulative_balance }
+          );
+        }
+        return;
+      }
+
+      const insertRecord = {
+        id: crypto.randomUUID(),
+        year: lastMonthYear,
+        month: lastMonth,
+        global_monthly_budget: raw_budget,
+        saving_goal: saving_goal,
+        monthly_budget: calculatedBudget,
+        monthly_actual_consumed: lastMonthConsumed,
+        monthly_balance: monthly_balance,
+        cumulative_balance: cumulative_balance
+      };
+
+      const { error: insertError } = await supabase.from("monthly_balance_records").insert(insertRecord);
+      
+      if (!insertError) {
+        cacheStore.clearCache(CACHE_KEY_ANALYSIS);
+        console.log(
+          "%c[Monthly Settlement Debug]", 
+          "background: #8b5cf6; color: white; padding: 4px; border-radius: 4px;",
+          { Action: "Inserted", SettledYear: lastMonthYear, SettledMonth: lastMonth, Budget: calculatedBudget, Consumed: lastMonthConsumed, Balance: monthly_balance, Cumulative: cumulative_balance }
+        );
+      }
+    } catch (err) {
+      console.error("Error in checkAndSettleLastMonth", err);
+    }
+  };
 
   const fetchHomeData = async () => {
     try {
@@ -373,6 +489,8 @@ export default function Home() {
       }
 
       setSyncStatus("syncing")
+
+      checkAndSettleLastMonth().catch(console.error);
 
       // 2. 异步在后台向 Supabase 拉取最新数据
       const monthStartStr = getLastMonthStartStr()
@@ -462,6 +580,7 @@ export default function Home() {
 
       if (error) throw error
 
+      cacheStore.clearCache(CACHE_KEY_ANALYSIS)
       setSyncStatus("synced")
       fetchHomeData()
     } catch (error: any) {
