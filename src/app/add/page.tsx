@@ -16,16 +16,15 @@ import {
 } from "@/components/ui/select"
 import { BudgetType } from "@/lib/types"
 
-interface BudgetItem {
+interface BudgetItemOption {
   id: string
-  name: string
-  budget_type: BudgetType
+  label: string
 }
 
 export default function AddTransactionPage() {
   const router = useRouter()
 
-  const [budgetItems, setBudgetItems] = useState<BudgetItem[]>([])
+  const [budgetItems, setBudgetItems] = useState<BudgetItemOption[]>([])
   const [loadingItems, setLoadingItems] = useState(true)
   const [saving, setSaving] = useState(false)
 
@@ -47,29 +46,26 @@ export default function AddTransactionPage() {
           supabase.from("monthly_elastic_budgets").select("id, name"),
         ])
 
-        const combinedItems: BudgetItem[] = []
+        const combinedItems: BudgetItemOption[] = []
 
         if (dailyRes.data) {
           combinedItems.push(...dailyRes.data.map(item => ({
-            id: item.id,
-            name: item.name,
-            budget_type: "daily_fixed" as BudgetType
+            id: `daily_fixed|${item.id}`,
+            label: `每日固定 | ${item.name}`,
           })))
         }
 
         if (monthlyFixedRes.data) {
           combinedItems.push(...monthlyFixedRes.data.map(item => ({
-            id: item.id,
-            name: item.name,
-            budget_type: "monthly_fixed" as BudgetType
+            id: `monthly_fixed|${item.id}`,
+            label: `每月固定 | ${item.name}`,
           })))
         }
 
         if (monthlyElasticRes.data) {
           combinedItems.push(...monthlyElasticRes.data.map(item => ({
-            id: item.id,
-            name: item.name,
-            budget_type: "monthly_elastic" as BudgetType
+            id: `monthly_elastic|${item.id}`,
+            label: `每月弹性 | ${item.name}`,
           })))
         }
 
@@ -106,14 +102,13 @@ export default function AddTransactionPage() {
 
     try {
       setSaving(true)
-      const numericAmount = Number(amount)
       const [budgetType, itemId] = selectedItemStr.split("|") as [BudgetType, string]
 
-      // 1. Insert Transaction
+      // 1. Insert Transaction (作为支出，金额存为负数)
       const { error: txError } = await supabase
         .from("transactions")
         .insert({
-          amount: numericAmount,
+          amount: -numericAmount,
           budget_type: budgetType,
           item_id: itemId,
           date: date,
@@ -122,56 +117,10 @@ export default function AddTransactionPage() {
 
       if (txError) throw txError
 
-      // 2. Determine correct table name
-      let tableName = ""
-      if (budgetType === "daily_fixed") {
-        tableName = "daily_fixed_budgets"
-      } else if (budgetType === "monthly_fixed") {
-        tableName = "monthly_fixed_budgets"
-      } else if (budgetType === "monthly_elastic") {
-        tableName = "monthly_elastic_budgets"
-      }
+      // 注意：这里删除了原来双写去更新预算表（consumed/remaining）的冗余逻辑
+      // 现在的架构严格遵循 Single Source of Truth，所有消费统计都交由前端读取 transactions 表动态运算解决。
 
-      if (tableName) {
-        // 3. Fetch current consumed/remaining
-        const { data: budgetData, error: fetchError } = await supabase
-          .from(tableName)
-          .select('consumed, remaining')
-          .eq('id', itemId)
-          .single()
-
-        if (fetchError) {
-          console.error("Fetch budget error:", fetchError)
-          throw fetchError
-        }
-
-        // 4. Calculate new values
-        // Note: amount is already negative from user input, but PRD logic typically means we add absolute if input was absolute. Let's assume input amount is positive for expense
-        // The prompt says: "new_consumed = 查出的 consumed + 本次记账 amount" (assuming amount is positive if expense, negative if income)
-        const currentConsumed = Number(budgetData?.consumed || 0)
-        const currentRemaining = Number(budgetData?.remaining || 0)
-        
-        // Let's use numericAmount directly as requested:
-        const newConsumed = currentConsumed + numericAmount
-        const newRemaining = currentRemaining - numericAmount
-
-        // 5. Update remote data
-        const { error: updateError } = await supabase
-          .from(tableName)
-          .update({ 
-            consumed: newConsumed, 
-            remaining: newRemaining 
-          })
-          .eq('id', itemId)
-
-        if (updateError) {
-          console.error("Update budget error:", updateError)
-          throw updateError
-        }
-      }
-
-      router.push("/")
-      router.refresh()
+      window.location.href = "/"
     } catch (error: any) {
       console.error("Error saving transaction:", error)
       alert("保存失败: " + (error?.message || "未知错误"))
@@ -220,15 +169,17 @@ export default function AddTransactionPage() {
                 <Label htmlFor="category" className="text-gray-700">分类</Label>
                 <Select value={selectedItemStr} onValueChange={(val) => setSelectedItemStr(val || "")} required>
                   <SelectTrigger className="h-12" id="category">
-                    <SelectValue placeholder={loadingItems ? "加载中..." : "选择预算分类"} />
+                    <SelectValue placeholder={loadingItems ? "加载中..." : "选择预算分类"}>
+                      {selectedItemStr ? budgetItems.find(item => item.id === selectedItemStr)?.label : undefined}
+                    </SelectValue>
                   </SelectTrigger>
                   <SelectContent>
                     {!loadingItems && budgetItems.length === 0 && (
                       <div className="p-2 text-sm text-gray-500 text-center">暂无预算条目</div>
                     )}
                     {budgetItems.map(item => (
-                      <SelectItem key={`${item.budget_type}|${item.id}`} value={`${item.budget_type}|${item.id}`}>
-                        {item.name}
+                      <SelectItem key={item.id} value={item.id}>
+                        {item.label}
                       </SelectItem>
                     ))}
                   </SelectContent>
