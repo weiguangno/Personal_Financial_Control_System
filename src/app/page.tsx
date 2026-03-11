@@ -99,7 +99,7 @@ const clampMinZero = (value: number) => Math.max(0, value)
 
 export default function Home() {
   const router = useRouter()
-  const { setSyncStatus } = useSync()
+  const { setStatus: setSyncStatus, registerRevalidator } = useSync()
 
   const [loading, setLoading] = useState(true)
   const [deletingId, setDeletingId] = useState<string | null>(null)
@@ -372,8 +372,9 @@ export default function Home() {
         setLoading(true)
       }
 
-      // 2. 异步在后台向 Supabase 拉取最新数据
       setSyncStatus("syncing")
+
+      // 2. 异步在后台向 Supabase 拉取最新数据
       const monthStartStr = getLastMonthStartStr()
       const [
         txRes,
@@ -426,6 +427,7 @@ export default function Home() {
 
   useEffect(() => {
     fetchHomeData();
+    registerRevalidator(fetchHomeData);
 
     const handleFocus = () => fetchHomeData();
     const handleVisibility = () => {
@@ -433,37 +435,42 @@ export default function Home() {
     };
 
     window.addEventListener("focus", handleFocus);
-    window.addEventListener("force-sync-refresh", handleFocus);
     document.addEventListener("visibilitychange", handleVisibility);
 
     return () => {
       window.removeEventListener("focus", handleFocus);
-      window.removeEventListener("force-sync-refresh", handleFocus);
       document.removeEventListener("visibilitychange", handleVisibility);
     };
   }, []);
 
-  const handleDeleteTx = (tx: TransactionRow) => {
+  const handleDeleteTx = async (tx: TransactionRow) => {
     if (!window.confirm("确定删除这笔记录吗？删除后首页金额会自动重新计算。")) return
 
-    // 乐观更新：先从 state 和 cache 移除这笔记录
-    const cachedData = cacheStore.getCache<any>(CACHE_KEY_HOME)
-    if (cachedData && cachedData.transactions) {
-      cachedData.transactions = cachedData.transactions.filter((t: any) => t.id !== tx.id)
-      cacheStore.setCache(CACHE_KEY_HOME, cachedData)
-      processAndSetHomeData(cachedData)
-    }
+    try {
+      setDeletingId(tx.id)
 
-    setSyncStatus("syncing")
-    supabase.from("transactions").delete().eq("id", tx.id)
-      .then(({ error }) => {
-        if (error) {
-          console.error("Error deleting transaction:", error)
-          setSyncStatus("error")
-        } else {
-          setSyncStatus("synced")
-        }
-      })
+      // 乐观更新：先从 state 和 cache 移除这笔记录
+      const cachedData = cacheStore.getCache<any>(CACHE_KEY_HOME)
+      if (cachedData && cachedData.transactions) {
+        cachedData.transactions = cachedData.transactions.filter((t: any) => t.id !== tx.id)
+        cacheStore.setCache(CACHE_KEY_HOME, cachedData)
+        processAndSetHomeData(cachedData)
+      }
+
+      setSyncStatus("syncing")
+      const { error } = await supabase.from("transactions").delete().eq("id", tx.id)
+
+      if (error) throw error
+
+      setSyncStatus("synced")
+      fetchHomeData()
+    } catch (error: any) {
+      console.error("Error deleting transaction:", error)
+      setSyncStatus("error")
+      alert("删除失败: " + (error?.message || "未知错误"))
+    } finally {
+      setDeletingId(null)
+    }
   }
 
   const getTxDisplayName = (tx: TransactionRow) => {
@@ -614,8 +621,9 @@ export default function Home() {
                           size="sm"
                           className="h-6 px-2 text-xs text-red-500 hover:text-red-600 hover:bg-red-50"
                           onClick={() => handleDeleteTx(tx)}
+                          disabled={deletingId === tx.id}
                         >
-                          删除
+                          {deletingId === tx.id ? "删除中..." : "删除"}
                         </Button>
                       </div>
                     </div>

@@ -163,7 +163,7 @@ function getMonthlyStatus(consumed: number, budget: number, strictMode: boolean)
 }
 
 export default function AnalysisPage() {
-  const { setSyncStatus } = useSync()
+  const { setStatus: setSyncStatus, registerRevalidator } = useSync()
   const [loading, setLoading] = useState(true)
 
   const [dailyBudgets, setDailyBudgets] = useState<ProgressItem[]>([])
@@ -367,6 +367,7 @@ export default function AnalysisPage() {
       }
 
       setSyncStatus("syncing")
+
       const monthStartStr = getLastMonthStartStr()
       const [
         dailyRes,
@@ -424,6 +425,7 @@ export default function AnalysisPage() {
 
   useEffect(() => {
     fetchData()
+    registerRevalidator(fetchData)
   }, [fetchData])
 
   useEffect(() => {
@@ -438,12 +440,10 @@ export default function AnalysisPage() {
     }
 
     window.addEventListener("focus", handleFocus)
-    window.addEventListener("force-sync-refresh", handleFocus)
     document.addEventListener("visibilitychange", handleVisibilityChange)
 
     return () => {
       window.removeEventListener("focus", handleFocus)
-      window.removeEventListener("force-sync-refresh", handleFocus)
       document.removeEventListener("visibilitychange", handleVisibilityChange)
     }
   }, [fetchData])
