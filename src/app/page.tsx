@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { supabase } from "@/lib/supabase"
+import { cacheStore, CACHE_KEY_HOME } from "@/lib/cacheStore"
 
 type BudgetType = "daily_fixed" | "monthly_fixed" | "monthly_elastic"
 
@@ -80,6 +81,14 @@ const getCurrentMonthStr = () => {
   return getTodayStr().slice(0, 7)
 }
 
+const getLastMonthStartStr = () => {
+  const d = new Date()
+  d.setMonth(d.getMonth() - 1)
+  const y = d.getFullYear()
+  const m = String(d.getMonth() + 1).padStart(2, "0")
+  return `${y}-${m}-01`
+}
+
 const getDaysInCurrentMonth = () => {
   const now = new Date()
   return new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate()
@@ -118,10 +127,251 @@ export default function Home() {
   const currentMonthStr = useMemo(() => getCurrentMonthStr(), [])
   const daysInCurrentMonth = useMemo(() => getDaysInCurrentMonth(), [])
 
+  const processAndSetHomeData = (data: any) => {
+    const transactions = (data.transactions || []) as TransactionRow[]
+    const dailyRows = (data.dailyRows || []) as DailyBudgetRow[]
+    const monthlyFixedRows = (data.monthlyFixedRows || []) as MonthlyFixedBudgetRow[]
+    const monthlyElasticRows = (data.monthlyElasticRows || []) as MonthlyElasticBudgetRow[]
+    const toggles = data.toggles || {}
+    const global = data.global || {}
+
+    setRecentTransactions(transactions.slice(0, 5))
+
+    // 计算所有消费（已取绝对值兼容）
+    const allConsumed = transactions.reduce((sum, tx) => {
+      return sum + Math.abs(toNumber(tx.amount))
+    }, 0)
+    setTotalConsumed(allConsumed)
+
+    const todayTransactions = transactions.filter((tx) => tx.date === todayStr)
+    const currentMonthTransactions = transactions.filter(
+      (tx) => tx.date && tx.date.startsWith(currentMonthStr)
+    )
+
+    // 1. 基础计算
+    const dailyFixedTotal = dailyRows.reduce((sum, item) => sum + toNumber(item.daily_budget), 0)
+
+    // 2. 过去差额计算 carry_over
+    const currentDayOfMonth = new Date().getDate()
+    const pastDaysCount = Math.max(0, currentDayOfMonth - 1)
+    
+    const pastDailyBaseTotal = dailyFixedTotal * pastDaysCount
+    const pastDailyConsumed = currentMonthTransactions
+      .filter(tx => tx.budget_type === "daily_fixed" && tx.date && tx.date < todayStr)
+      .reduce((sum, tx) => sum + Math.abs(toNumber(tx.amount)), 0)
+
+    const carry_over = Math.max(0, pastDailyBaseTotal - pastDailyConsumed)
+
+    // 3. 结转与弹性互斥逻辑
+    const rolloverDaily = !!toggles.rollover_daily
+    const overflowToFlexible = !!toggles.overflow_to_flexible
+
+    let today_allowance = dailyFixedTotal
+    let flexible_bonus_from_daily = 0
+
+    if (overflowToFlexible) {
+      flexible_bonus_from_daily = carry_over
+    } else if (rolloverDaily) {
+      today_allowance = dailyFixedTotal + carry_over
+    }
+
+    const dailyBudgetCards: DailyBudgetCardItem[] = dailyRows.map((item) => {
+      const itemDailyBudget = toNumber(item.daily_budget)
+      
+      const itemPastConsumed = currentMonthTransactions
+        .filter(tx => tx.budget_type === "daily_fixed" && tx.item_id === item.id && tx.date && tx.date < todayStr)
+        .reduce((sum, tx) => sum + Math.abs(toNumber(tx.amount)), 0)
+      
+      const itemCarryOver = Math.max(0, (itemDailyBudget * pastDaysCount) - itemPastConsumed)
+
+      let itemTodayBudget = itemDailyBudget
+      if (!overflowToFlexible && rolloverDaily) {
+        itemTodayBudget = itemDailyBudget + itemCarryOver
+      }
+
+      const todayConsumed = todayTransactions
+        .filter((tx) => tx.budget_type === "daily_fixed" && tx.item_id === item.id)
+        .reduce((sum, tx) => sum + Math.abs(toNumber(tx.amount)), 0)
+
+      return {
+        id: item.id,
+        name: item.name || "未命名",
+        todayBudget: itemTodayBudget,
+        todayConsumed,
+        todayRemaining: clampMinZero(itemTodayBudget - todayConsumed),
+      }
+    })
+
+    setDailyBudgets(dailyBudgetCards)
+
+    const monthlyFixedBudgetTotal = monthlyFixedRows.reduce((sum, item) => {
+      return sum + toNumber(item.monthly_budget)
+    }, 0)
+
+    const monthlyFixedConsumed = currentMonthTransactions
+      .filter((tx) => tx.budget_type === "monthly_fixed")
+      .reduce((sum, tx) => sum + Math.abs(toNumber(tx.amount)), 0)
+
+    const computedMonthlyFixedRemaining = clampMinZero(
+      monthlyFixedBudgetTotal - monthlyFixedConsumed
+    )
+    setMonthlyFixedRemaining(computedMonthlyFixedRemaining)
+
+    const todayConsumedForStatus = todayTransactions
+      .filter((tx) => {
+        if (tx.budget_type === "daily_fixed") return true
+        return false
+      })
+      .reduce((sum, tx) => sum + Math.abs(toNumber(tx.amount)), 0)
+
+    const strictMode = !!toggles.strict_mode
+    const strictOffset = strictMode ? 0.1 : 0
+    const todayRatio = today_allowance > 0 ? todayConsumedForStatus / today_allowance : 0
+
+    let todayStatusText = "🟢 正常"
+    let todayStatusColor = "text-green-500"
+
+    if (todayRatio > 1) {
+      todayStatusText = "🔴 超支"
+      todayStatusColor = "text-red-500"
+    } else if (todayRatio >= (0.85 - strictOffset)) {
+      todayStatusText = "🟠 紧张"
+      todayStatusColor = "text-orange-500"
+    } else if (todayRatio >= (0.7 - strictOffset)) {
+      todayStatusText = "🟡 注意"
+      todayStatusColor = "text-yellow-500"
+    }
+
+    const globalMonthlyBudget = toNumber(global.monthly_budget)
+    const savingGoal = toNumber(global.saving_goal)
+    const deductSavingGoal = !!toggles.deduct_saving_goal
+
+    const availableMonthlyBudget = deductSavingGoal
+      ? Math.max(0, globalMonthlyBudget - savingGoal)
+      : globalMonthlyBudget
+
+    const dailyFixedMonthlyTotal = dailyFixedTotal * daysInCurrentMonth
+
+    // 基础弹性预算
+    const monthlyElasticBaseBudget = clampMinZero(
+      availableMonthlyBudget - dailyFixedMonthlyTotal - monthlyFixedBudgetTotal
+    )
+
+    const monthlyElasticConsumed = currentMonthTransactions
+      .filter((tx) => tx.budget_type === "monthly_elastic")
+      .reduce((sum, tx) => sum + Math.abs(toNumber(tx.amount)), 0)
+
+    // 弹性剩余 = 基础弹性 + 每日差额奖励(如开启) - 弹性已消费
+    const computedMonthlyElasticRemaining = clampMinZero(
+      monthlyElasticBaseBudget + flexible_bonus_from_daily - monthlyElasticConsumed
+    )
+    setMonthlyElasticRemaining(computedMonthlyElasticRemaining)
+
+    const monthConsumedAll = currentMonthTransactions
+      .reduce((sum, tx) => sum + Math.abs(toNumber(tx.amount)), 0)
+
+    const monthRemaining = clampMinZero(availableMonthlyBudget - monthConsumedAll)
+
+    const monthBalance =
+      computedMonthlyFixedRemaining + computedMonthlyElasticRemaining
+
+    // 阶段 4：智能消费建议逻辑 (8.1, 8.2, 8.3)
+    let todayAdvice = ""
+    if (todayRatio < 0.7) {
+      todayAdvice = "今日预算充足，按需消费即可。"
+    } else if (todayRatio <= 1) {
+      todayAdvice = "今日固定预算已消耗较多，请避免计划外支出。"
+    } else {
+      todayAdvice = "今日固定支出已超标，明天请务必克制！"
+    }
+
+    let maxCategoryName = ""
+    let maxCategoryRatio = -1
+
+    dailyRows.forEach(item => {
+      const itemBudget = toNumber(item.daily_budget) * daysInCurrentMonth
+      const itemConsumed = currentMonthTransactions
+        .filter(tx => tx.budget_type === "daily_fixed" && tx.item_id === item.id)
+        .reduce((sum, tx) => sum + Math.abs(toNumber(tx.amount)), 0)
+      const ratio = itemBudget > 0 ? itemConsumed / itemBudget : 0
+      if (ratio > maxCategoryRatio) {
+        maxCategoryRatio = ratio
+        maxCategoryName = item.name || "未命名"
+      }
+    })
+
+    monthlyFixedRows.forEach(item => {
+      const itemBudget = toNumber(item.monthly_budget)
+      const itemConsumed = currentMonthTransactions
+        .filter(tx => tx.budget_type === "monthly_fixed" && tx.item_id === item.id)
+        .reduce((sum, tx) => sum + Math.abs(toNumber(tx.amount)), 0)
+      const ratio = itemBudget > 0 ? itemConsumed / itemBudget : 0
+      if (ratio > maxCategoryRatio) {
+        maxCategoryRatio = ratio
+        maxCategoryName = item.name || "未命名"
+      }
+    })
+
+    const totalFlexibleBudget = monthlyElasticBaseBudget + flexible_bonus_from_daily
+    if (totalFlexibleBudget > 0) {
+      const elasticRatio = monthlyElasticConsumed / totalFlexibleBudget
+      if (elasticRatio > maxCategoryRatio) {
+        maxCategoryRatio = elasticRatio
+        maxCategoryName = monthlyElasticRows[0]?.name || "弹性预算"
+      }
+    }
+
+    let categoryAdvice = ""
+    if (maxCategoryRatio > 0.8) {
+      categoryAdvice = `【${maxCategoryName}】预算已接近或超出上限，建议近期减少此类消费。`
+    } else {
+      categoryAdvice = "各类别消费均在健康范围内，继续保持。"
+    }
+
+    let monthlyAdvice = ""
+    const monthRatio = availableMonthlyBudget > 0 ? monthConsumedAll / availableMonthlyBudget : 0
+    if (currentDayOfMonth < 15 && totalFlexibleBudget > 0 && monthlyElasticConsumed > totalFlexibleBudget * 0.5) {
+      monthlyAdvice = "上半月弹性预算消耗过快，后半月需要勒紧裤腰带了。"
+    } else if (monthRatio > 1) {
+      monthlyAdvice = "本月总消费已超支，请立即停止一切非必要开支！"
+    } else if (monthRatio >= (0.8 - strictOffset)) {
+      monthlyAdvice = "本月预算已偏紧，请注意控制整体消费节奏。"
+    } else {
+      monthlyAdvice = "本月总体消费进度良好，请继续保持。"
+    }
+
+    setAdvices({
+      today: todayAdvice,
+      category: categoryAdvice,
+      monthly: monthlyAdvice
+    })
+
+    setTopOverview({
+      todayAvailable: today_allowance,
+      todayStatus: { text: todayStatusText, color: todayStatusColor },
+      monthRemaining,
+      monthBalance,
+      monthlyBudget: globalMonthlyBudget,
+    })
+
+    if (monthlyElasticRows.length > 1) {
+      console.warn("monthly_elastic_budgets 表中检测到多条记录。按你的规则建议仅保留 1 条“其他”记录。")
+    }
+  }
+
   const fetchHomeData = async () => {
     try {
-      setLoading(true)
+      // 1. 本地缓存读取与展示
+      const cachedData = cacheStore.getCache<any>(CACHE_KEY_HOME)
+      if (cachedData) {
+        processAndSetHomeData(cachedData)
+        setLoading(false)
+      } else {
+        setLoading(true)
+      }
 
+      // 2. 异步在后台向 Supabase 拉取最新数据
+      const monthStartStr = getLastMonthStartStr()
       const [
         txRes,
         dailyRes,
@@ -130,7 +380,9 @@ export default function Home() {
         togglesRes,
         globalRes,
       ] = await Promise.all([
-        supabase.from("transactions").select("*").order("created_at", { ascending: false }),
+        supabase.from("transactions").select("*")
+          .gte("date", monthStartStr)
+          .order("created_at", { ascending: false }),
         supabase.from("daily_fixed_budgets").select("*"),
         supabase.from("monthly_fixed_budgets").select("*"),
         supabase.from("monthly_elastic_budgets").select("*"),
@@ -145,237 +397,21 @@ export default function Home() {
       if (togglesRes.error) throw togglesRes.error
       if (globalRes.error) throw globalRes.error
 
-      const transactions = (txRes.data || []) as TransactionRow[]
-      const dailyRows = (dailyRes.data || []) as DailyBudgetRow[]
-      const monthlyFixedRows = (monthlyFixedRes.data || []) as MonthlyFixedBudgetRow[]
-      const monthlyElasticRows = (monthlyElasticRes.data || []) as MonthlyElasticBudgetRow[]
-      const toggles = (togglesRes.data as SystemTogglesRow)?.toggles || {}
-      const global = (globalRes.data as GlobalSettingsRow) || {}
-
-      setRecentTransactions(transactions.slice(0, 5))
-
-      // 计算所有消费（已取绝对值兼容）
-      const allConsumed = transactions.reduce((sum, tx) => {
-        return sum + toAbsExpense(tx.amount)
-      }, 0)
-      setTotalConsumed(allConsumed)
-
-      const todayTransactions = transactions.filter((tx) => tx.date === todayStr)
-      const currentMonthTransactions = transactions.filter(
-        (tx) => tx.date && tx.date.startsWith(currentMonthStr)
-      )
-
-      // 1. 基础计算
-      const dailyFixedTotal = dailyRows.reduce((sum, item) => sum + toNumber(item.daily_budget), 0)
-
-      // 2. 过去差额计算 carry_over
-      const currentDayOfMonth = new Date().getDate()
-      const pastDaysCount = Math.max(0, currentDayOfMonth - 1)
-      
-      const pastDailyBaseTotal = dailyFixedTotal * pastDaysCount
-      const pastDailyConsumed = currentMonthTransactions
-        .filter(tx => tx.budget_type === "daily_fixed" && tx.date && tx.date < todayStr)
-        .reduce((sum, tx) => sum + toAbsExpense(tx.amount), 0)
-
-      const carry_over = Math.max(0, pastDailyBaseTotal - pastDailyConsumed)
-
-      // 3. 结转与弹性互斥逻辑
-      const rolloverDaily = !!toggles.rollover_daily
-      const overflowToFlexible = !!toggles.overflow_to_flexible
-
-      let today_allowance = dailyFixedTotal
-      let flexible_bonus_from_daily = 0
-
-      if (overflowToFlexible) {
-        flexible_bonus_from_daily = carry_over
-      } else if (rolloverDaily) {
-        today_allowance = dailyFixedTotal + carry_over
+      const freshData = {
+        transactions: txRes.data || [],
+        dailyRows: dailyRes.data || [],
+        monthlyFixedRows: monthlyFixedRes.data || [],
+        monthlyElasticRows: monthlyElasticRes.data || [],
+        toggles: (togglesRes.data as SystemTogglesRow)?.toggles || {},
+        global: (globalRes.data as GlobalSettingsRow) || {}
       }
 
-      const dailyBudgetCards: DailyBudgetCardItem[] = dailyRows.map((item) => {
-        const itemDailyBudget = toNumber(item.daily_budget)
-        
-        const itemPastConsumed = currentMonthTransactions
-          .filter(tx => tx.budget_type === "daily_fixed" && tx.item_id === item.id && tx.date && tx.date < todayStr)
-          .reduce((sum, tx) => sum + toAbsExpense(tx.amount), 0)
-        
-        const itemCarryOver = Math.max(0, (itemDailyBudget * pastDaysCount) - itemPastConsumed)
+      // 3. 将最新云端数据写入本地缓存
+      cacheStore.setCache(CACHE_KEY_HOME, freshData)
 
-        let itemTodayBudget = itemDailyBudget
-        if (!overflowToFlexible && rolloverDaily) {
-          itemTodayBudget = itemDailyBudget + itemCarryOver
-        }
+      // 4. 静默校准 UI
+      processAndSetHomeData(freshData)
 
-        const todayConsumed = todayTransactions
-          .filter((tx) => tx.budget_type === "daily_fixed" && tx.item_id === item.id)
-          .reduce((sum, tx) => sum + toAbsExpense(tx.amount), 0)
-
-        return {
-          id: item.id,
-          name: item.name || "未命名",
-          todayBudget: itemTodayBudget,
-          todayConsumed,
-          todayRemaining: clampMinZero(itemTodayBudget - todayConsumed),
-        }
-      })
-
-      setDailyBudgets(dailyBudgetCards)
-
-      const monthlyFixedBudgetTotal = monthlyFixedRows.reduce((sum, item) => {
-        return sum + toNumber(item.monthly_budget)
-      }, 0)
-
-      const monthlyFixedConsumed = currentMonthTransactions
-        .filter((tx) => tx.budget_type === "monthly_fixed")
-        .reduce((sum, tx) => sum + toAbsExpense(tx.amount), 0)
-
-      const computedMonthlyFixedRemaining = clampMinZero(
-        monthlyFixedBudgetTotal - monthlyFixedConsumed
-      )
-      setMonthlyFixedRemaining(computedMonthlyFixedRemaining)
-
-      const todayConsumedForStatus = todayTransactions
-        .filter((tx) => {
-          if (tx.budget_type === "daily_fixed") return true
-          return false
-        })
-        .reduce((sum, tx) => sum + toAbsExpense(tx.amount), 0)
-
-      const strictMode = !!toggles.strict_mode
-      const strictOffset = strictMode ? 0.1 : 0
-      const todayRatio = today_allowance > 0 ? todayConsumedForStatus / today_allowance : 0
-
-      let todayStatusText = "🟢 正常"
-      let todayStatusColor = "text-green-500"
-
-      if (todayRatio > 1) {
-        todayStatusText = "🔴 超支"
-        todayStatusColor = "text-red-500"
-      } else if (todayRatio >= (0.85 - strictOffset)) {
-        todayStatusText = "🟠 紧张"
-        todayStatusColor = "text-orange-500"
-      } else if (todayRatio >= (0.7 - strictOffset)) {
-        todayStatusText = "🟡 注意"
-        todayStatusColor = "text-yellow-500"
-      }
-
-      const globalMonthlyBudget = toNumber(global.monthly_budget)
-      const savingGoal = toNumber(global.saving_goal)
-      const deductSavingGoal = !!toggles.deduct_saving_goal
-
-      const availableMonthlyBudget = deductSavingGoal
-        ? Math.max(0, globalMonthlyBudget - savingGoal)
-        : globalMonthlyBudget
-
-      const dailyFixedMonthlyTotal = dailyFixedTotal * daysInCurrentMonth
-
-      // past code blocks here evaluating elasticBonusFromDaily have been moved up
-
-      // 基础弹性预算
-      const monthlyElasticBaseBudget = clampMinZero(
-        availableMonthlyBudget - dailyFixedMonthlyTotal - monthlyFixedBudgetTotal
-      )
-
-      const monthlyElasticConsumed = currentMonthTransactions
-        .filter((tx) => tx.budget_type === "monthly_elastic")
-        .reduce((sum, tx) => sum + toAbsExpense(tx.amount), 0)
-
-      // 弹性剩余 = 基础弹性 + 每日差额奖励(如开启) - 弹性已消费
-      const computedMonthlyElasticRemaining = clampMinZero(
-        monthlyElasticBaseBudget + flexible_bonus_from_daily - monthlyElasticConsumed
-      )
-      setMonthlyElasticRemaining(computedMonthlyElasticRemaining)
-
-      const monthConsumedAll = currentMonthTransactions
-        .reduce((sum, tx) => sum + toAbsExpense(tx.amount), 0)
-
-      const monthRemaining = clampMinZero(availableMonthlyBudget - monthConsumedAll)
-
-      const monthBalance =
-        computedMonthlyFixedRemaining + computedMonthlyElasticRemaining
-
-      // 阶段 4：智能消费建议逻辑 (8.1, 8.2, 8.3)
-      let todayAdvice = ""
-      if (todayRatio < 0.7) {
-        todayAdvice = "今日预算充足，按需消费即可。"
-      } else if (todayRatio <= 1) {
-        todayAdvice = "今日固定预算已消耗较多，请避免计划外支出。"
-      } else {
-        todayAdvice = "今日固定支出已超标，明天请务必克制！"
-      }
-
-      let maxCategoryName = ""
-      let maxCategoryRatio = -1
-
-      dailyRows.forEach(item => {
-        const itemBudget = toNumber(item.daily_budget) * daysInCurrentMonth
-        const itemConsumed = currentMonthTransactions
-          .filter(tx => tx.budget_type === "daily_fixed" && tx.item_id === item.id)
-          .reduce((sum, tx) => sum + toAbsExpense(tx.amount), 0)
-        const ratio = itemBudget > 0 ? itemConsumed / itemBudget : 0
-        if (ratio > maxCategoryRatio) {
-          maxCategoryRatio = ratio
-          maxCategoryName = item.name || "未命名"
-        }
-      })
-
-      monthlyFixedRows.forEach(item => {
-        const itemBudget = toNumber(item.monthly_budget)
-        const itemConsumed = currentMonthTransactions
-          .filter(tx => tx.budget_type === "monthly_fixed" && tx.item_id === item.id)
-          .reduce((sum, tx) => sum + toAbsExpense(tx.amount), 0)
-        const ratio = itemBudget > 0 ? itemConsumed / itemBudget : 0
-        if (ratio > maxCategoryRatio) {
-          maxCategoryRatio = ratio
-          maxCategoryName = item.name || "未命名"
-        }
-      })
-
-      const totalFlexibleBudget = monthlyElasticBaseBudget + flexible_bonus_from_daily
-      if (totalFlexibleBudget > 0) {
-        const elasticRatio = monthlyElasticConsumed / totalFlexibleBudget
-        if (elasticRatio > maxCategoryRatio) {
-          maxCategoryRatio = elasticRatio
-          maxCategoryName = monthlyElasticRows[0]?.name || "弹性预算"
-        }
-      }
-
-      let categoryAdvice = ""
-      if (maxCategoryRatio > 0.8) {
-        categoryAdvice = `【${maxCategoryName}】预算已接近或超出上限，建议近期减少此类消费。`
-      } else {
-        categoryAdvice = "各类别消费均在健康范围内，继续保持。"
-      }
-
-      let monthlyAdvice = ""
-      const monthRatio = availableMonthlyBudget > 0 ? monthConsumedAll / availableMonthlyBudget : 0
-      if (currentDayOfMonth < 15 && totalFlexibleBudget > 0 && monthlyElasticConsumed > totalFlexibleBudget * 0.5) {
-        monthlyAdvice = "上半月弹性预算消耗过快，后半月需要勒紧裤腰带了。"
-      } else if (monthRatio > 1) {
-        monthlyAdvice = "本月总消费已超支，请立即停止一切非必要开支！"
-      } else if (monthRatio >= (0.8 - strictOffset)) {
-        monthlyAdvice = "本月预算已偏紧，请注意控制整体消费节奏。"
-      } else {
-        monthlyAdvice = "本月总体消费进度良好，请继续保持。"
-      }
-
-      setAdvices({
-        today: todayAdvice,
-        category: categoryAdvice,
-        monthly: monthlyAdvice
-      })
-
-      setTopOverview({
-        todayAvailable: today_allowance,
-        todayStatus: { text: todayStatusText, color: todayStatusColor },
-        monthRemaining,
-        monthBalance,
-        monthlyBudget: globalMonthlyBudget,
-      })
-
-      if (monthlyElasticRows.length > 1) {
-        console.warn("monthly_elastic_budgets 表中检测到多条记录。按你的规则建议仅保留 1 条“其他”记录。")
-      }
     } catch (error) {
       console.error("Error fetching home data:", error)
     } finally {
@@ -406,11 +442,19 @@ export default function Home() {
     try {
       setDeletingId(tx.id)
 
+      // 乐观更新：先从 state 和 cache 移除这笔记录
+      const cachedData = cacheStore.getCache<any>(CACHE_KEY_HOME)
+      if (cachedData && cachedData.transactions) {
+        cachedData.transactions = cachedData.transactions.filter((t: any) => t.id !== tx.id)
+        cacheStore.setCache(CACHE_KEY_HOME, cachedData)
+        processAndSetHomeData(cachedData)
+      }
+
       const { error } = await supabase.from("transactions").delete().eq("id", tx.id)
 
       if (error) throw error
 
-      await fetchHomeData()
+      fetchHomeData()
     } catch (error: any) {
       console.error("Error deleting transaction:", error)
       alert("删除失败: " + (error?.message || "未知错误"))

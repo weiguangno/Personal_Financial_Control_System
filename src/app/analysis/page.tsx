@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from "react"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { supabase } from "@/lib/supabase"
+import { cacheStore, CACHE_KEY_ANALYSIS } from "@/lib/cacheStore"
 import { BarChart, Bar, XAxis, Tooltip, ResponsiveContainer } from "recharts"
 
 type BudgetType = "daily_fixed" | "monthly_fixed" | "monthly_elastic"
@@ -98,6 +99,14 @@ function getTodayStr() {
   return `${y}-${m}-${day}`
 }
 
+function getLastMonthStartStr() {
+  const d = new Date()
+  d.setMonth(d.getMonth() - 1)
+  const y = d.getFullYear()
+  const m = String(d.getMonth() + 1).padStart(2, "0")
+  return `${y}-${m}-01`
+}
+
 // Helper for categorical single-item checks (7.2)
 function getCategoryStatus(consumed: number, budget: number, strictMode: boolean) {
   if (budget <= 0) {
@@ -170,46 +179,14 @@ export default function AnalysisPage() {
   const todayStr = useMemo(() => getTodayStr(), [])
 
   const fetchData = useCallback(async () => {
-    try {
-      setLoading(true)
-
-      const [
-        dailyRes,
-        monthlyFixedRes,
-        monthlyElasticRes,
-        balanceRes,
-        txRes,
-        togglesRes,
-        globalRes,
-      ] = await Promise.all([
-        supabase.from("daily_fixed_budgets").select("*"),
-        supabase.from("monthly_fixed_budgets").select("*"),
-        supabase.from("monthly_elastic_budgets").select("*"),
-        supabase
-          .from("monthly_balance_records")
-          .select("*")
-          .order("year", { ascending: false })
-          .order("month", { ascending: false }),
-        supabase.from("transactions").select("*").order("date", { ascending: false }),
-        supabase.from("system_toggles").select("*").limit(1).maybeSingle(),
-        supabase.from("global_settings").select("*").limit(1).maybeSingle(),
-      ])
-
-      if (dailyRes.error) throw dailyRes.error
-      if (monthlyFixedRes.error) throw monthlyFixedRes.error
-      if (monthlyElasticRes.error) throw monthlyElasticRes.error
-      if (balanceRes.error) throw balanceRes.error
-      if (txRes.error) throw txRes.error
-      if (togglesRes.error) throw togglesRes.error
-      if (globalRes.error) throw globalRes.error
-
-      const dailyData = (dailyRes.data || []) as DailyBudgetRow[]
-      const monthlyFixedData = (monthlyFixedRes.data || []) as MonthlyFixedBudgetRow[]
-      const monthlyElasticData = (monthlyElasticRes.data || []) as MonthlyElasticBudgetRow[]
-      const balanceData = (balanceRes.data || []) as BalanceRecordRow[]
-      const transactions = (txRes.data || []) as TransactionRow[]
-      const toggles = (togglesRes.data as SystemTogglesRow)?.toggles || {}
-      const global = (globalRes.data as GlobalSettingsRow) || {}
+    const processData = (data: any) => {
+      const dailyData = (data.dailyData || []) as DailyBudgetRow[]
+      const monthlyFixedData = (data.monthlyFixedData || []) as MonthlyFixedBudgetRow[]
+      const monthlyElasticData = (data.monthlyElasticData || []) as MonthlyElasticBudgetRow[]
+      const balanceData = (data.balanceData || []) as BalanceRecordRow[]
+      const transactions = (data.transactions || []) as TransactionRow[]
+      const toggles = data.toggles || {}
+      const global = data.global || {}
 
       setBalanceRecords(balanceData)
 
@@ -376,6 +353,63 @@ export default function AnalysisPage() {
       }
 
       setTrendData(last7Days)
+    }
+
+    try {
+      const cachedData = cacheStore.getCache<any>(CACHE_KEY_ANALYSIS)
+      if (cachedData) {
+        processData(cachedData)
+        setLoading(false)
+      } else {
+        setLoading(true)
+      }
+
+      const monthStartStr = getLastMonthStartStr()
+      const [
+        dailyRes,
+        monthlyFixedRes,
+        monthlyElasticRes,
+        balanceRes,
+        txRes,
+        togglesRes,
+        globalRes,
+      ] = await Promise.all([
+        supabase.from("daily_fixed_budgets").select("*"),
+        supabase.from("monthly_fixed_budgets").select("*"),
+        supabase.from("monthly_elastic_budgets").select("*"),
+        supabase
+          .from("monthly_balance_records")
+          .select("*")
+          .order("year", { ascending: false })
+          .order("month", { ascending: false }),
+        supabase.from("transactions").select("*")
+          .gte("date", monthStartStr)
+          .order("date", { ascending: false }),
+        supabase.from("system_toggles").select("*").limit(1).maybeSingle(),
+        supabase.from("global_settings").select("*").limit(1).maybeSingle(),
+      ])
+
+      if (dailyRes.error) throw dailyRes.error
+      if (monthlyFixedRes.error) throw monthlyFixedRes.error
+      if (monthlyElasticRes.error) throw monthlyElasticRes.error
+      if (balanceRes.error) throw balanceRes.error
+      if (txRes.error) throw txRes.error
+      if (togglesRes.error) throw togglesRes.error
+      if (globalRes.error) throw globalRes.error
+
+      const freshData = {
+        dailyData: dailyRes.data || [],
+        monthlyFixedData: monthlyFixedRes.data || [],
+        monthlyElasticData: monthlyElasticRes.data || [],
+        balanceData: balanceRes.data || [],
+        transactions: txRes.data || [],
+        toggles: (togglesRes.data as SystemTogglesRow)?.toggles || {},
+        global: (globalRes.data as GlobalSettingsRow) || {}
+      }
+
+      cacheStore.setCache(CACHE_KEY_ANALYSIS, freshData)
+      processData(freshData)
+
     } catch (error) {
       console.error("Error fetching analysis data:", error)
     } finally {

@@ -8,8 +8,7 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { supabase } from "@/lib/supabase"
-// 如果你本地没有这个文件可以注释掉这行，原代码中未实际调用该函数
-// import { executeDailyRollover } from "@/lib/rollover" 
+import { cacheStore, CACHE_KEY_SETTINGS } from "@/lib/cacheStore"
 
 export default function SettingsPage() {
   const [loading, setLoading] = useState(true)
@@ -36,9 +35,34 @@ export default function SettingsPage() {
   const [newAmount, setNewAmount] = useState<string>("")
   const [isAdding, setIsAdding] = useState(false)
 
+  const processAndSetSettingsData = (data: any) => {
+    if (data.global) {
+      setGlobalSettings({
+        id: data.global.id,
+        monthly_budget: data.global.monthly_budget || 0,
+        saving_goal: data.global.saving_goal || 0
+      })
+    }
+    if (data.dailyData) setDailyBudgets(data.dailyData)
+    if (data.mFixedData) setMonthlyFixedBudgets(data.mFixedData)
+    if (data.mElasticData) setMonthlyElasticBudgets(data.mElasticData)
+
+    if (data.togglesRow) {
+      setTogglesId(data.togglesRow.id)
+      setToggles(data.togglesRow.toggles || {})
+    }
+  }
+
   const fetchAllData = async () => {
     try {
-      setLoading(true)
+      const cachedData = cacheStore.getCache<any>(CACHE_KEY_SETTINGS)
+      if (cachedData) {
+        processAndSetSettingsData(cachedData)
+        setLoading(false)
+      } else {
+        setLoading(true)
+      }
+
       const [
         globalRes,
         dailyRes,
@@ -53,21 +77,17 @@ export default function SettingsPage() {
         supabase.from("system_toggles").select("*").limit(1).maybeSingle()
       ])
 
-      if (globalRes.data) {
-        setGlobalSettings({
-          id: globalRes.data.id,
-          monthly_budget: globalRes.data.monthly_budget || 0,
-          saving_goal: globalRes.data.saving_goal || 0
-        })
+      const freshData = {
+        global: globalRes.data || null,
+        dailyData: dailyRes.data || [],
+        mFixedData: mFixedRes.data || [],
+        mElasticData: mElasticRes.data || [],
+        togglesRow: togglesRes.data || null
       }
-      if (dailyRes.data) setDailyBudgets(dailyRes.data)
-      if (mFixedRes.data) setMonthlyFixedBudgets(mFixedRes.data)
-      if (mElasticRes.data) setMonthlyElasticBudgets(mElasticRes.data)
 
-      if (togglesRes.data) {
-        setTogglesId(togglesRes.data.id)
-        setToggles(togglesRes.data.toggles || {})
-      }
+      cacheStore.setCache(CACHE_KEY_SETTINGS, freshData)
+      processAndSetSettingsData(freshData)
+
     } catch (error) {
       console.error("Error fetching settings:", error)
     } finally {
@@ -86,57 +106,65 @@ export default function SettingsPage() {
       return
     }
 
-    setIsAdding(true)
     const amountNum = Number(newAmount)
-    const daysInMonth = new Date(new Date().getFullYear(), new Date().getMonth() + 1, 0).getDate();
+    const newId = crypto.randomUUID()
 
-    try {
-      let tableName = ""
-      let insertData: any = { name: newName.trim() }
+    let tableName = ""
+    let insertData: any = { id: newId, name: newName.trim() }
 
-      // 剔除了以前双写表时的 remaining 字段，只存储基础配置
-      if (newType === "daily_fixed") {
-        tableName = "daily_fixed_budgets"
-        insertData.daily_budget = amountNum
-      } else if (newType === "monthly_fixed") {
-        tableName = "monthly_fixed_budgets"
-        insertData.monthly_budget = amountNum
-      } else if (newType === "monthly_elastic") {
-        tableName = "monthly_elastic_budgets"
-        insertData.monthly_budget = amountNum
-      }
-
-      const { error } = await supabase.from(tableName).insert(insertData)
-      if (error) throw error
-
-      // Reset form & Refresh list
-      setNewName("")
-      setNewAmount("")
-      await fetchAllData()
-    } catch (error: any) {
-      alert("添加失败: " + (error?.message || "未知错误"))
-    } finally {
-      setIsAdding(false)
+    if (newType === "daily_fixed") {
+      tableName = "daily_fixed_budgets"
+      insertData.daily_budget = amountNum
+      setDailyBudgets(prev => [...prev, insertData])
+    } else if (newType === "monthly_fixed") {
+      tableName = "monthly_fixed_budgets"
+      insertData.monthly_budget = amountNum
+      setMonthlyFixedBudgets(prev => [...prev, insertData])
+    } else if (newType === "monthly_elastic") {
+      tableName = "monthly_elastic_budgets"
+      insertData.monthly_budget = amountNum
+      setMonthlyElasticBudgets(prev => [...prev, insertData])
     }
+
+    setNewName("")
+    setNewAmount("")
+
+    const cachedData = cacheStore.getCache<any>(CACHE_KEY_SETTINGS) || {}
+    if (newType === "daily_fixed") cachedData.dailyData = [...(cachedData.dailyData || []), insertData]
+    if (newType === "monthly_fixed") cachedData.mFixedData = [...(cachedData.mFixedData || []), insertData]
+    if (newType === "monthly_elastic") cachedData.mElasticData = [...(cachedData.mElasticData || []), insertData]
+    cacheStore.setCache(CACHE_KEY_SETTINGS, cachedData)
+
+    supabase.from(tableName).insert(insertData).then(({ error }) => {
+      if (error) console.error("Error adding budget", error)
+    })
   }
 
   // Delete Budget Category
   const handleDeleteBudget = async (id: string, type: string) => {
     if (!confirm("确定要删除该分类吗？")) return
 
-    try {
-      let tableName = ""
-      if (type === "daily_fixed") tableName = "daily_fixed_budgets"
-      else if (type === "monthly_fixed") tableName = "monthly_fixed_budgets"
-      else if (type === "monthly_elastic") tableName = "monthly_elastic_budgets"
+    let tableName = ""
+    const cachedData = cacheStore.getCache<any>(CACHE_KEY_SETTINGS) || {}
 
-      const { error } = await supabase.from(tableName).delete().eq("id", id)
-      if (error) throw error
-
-      await fetchAllData()
-    } catch (error: any) {
-      alert("删除失败: " + (error?.message || "未知错误"))
+    if (type === "daily_fixed") {
+      tableName = "daily_fixed_budgets"
+      setDailyBudgets(prev => prev.filter(item => item.id !== id))
+      if (cachedData.dailyData) cachedData.dailyData = cachedData.dailyData.filter((i:any) => i.id !== id)
+    } else if (type === "monthly_fixed") {
+      tableName = "monthly_fixed_budgets"
+      setMonthlyFixedBudgets(prev => prev.filter(item => item.id !== id))
+      if (cachedData.mFixedData) cachedData.mFixedData = cachedData.mFixedData.filter((i:any) => i.id !== id)
+    } else if (type === "monthly_elastic") {
+      tableName = "monthly_elastic_budgets"
+      setMonthlyElasticBudgets(prev => prev.filter(item => item.id !== id))
+      if (cachedData.mElasticData) cachedData.mElasticData = cachedData.mElasticData.filter((i:any) => i.id !== id)
     }
+    cacheStore.setCache(CACHE_KEY_SETTINGS, cachedData)
+
+    supabase.from(tableName).delete().eq("id", id).then(({error}) => {
+      if (error) console.error("Error deleting budget", error)
+    })
   }
 
   // Update System Toggles
@@ -144,45 +172,49 @@ export default function SettingsPage() {
     const newToggles = { ...toggles, [key]: checked };
     setToggles(newToggles);
 
-    const { error } = await supabase
+    const cachedData = cacheStore.getCache<any>(CACHE_KEY_SETTINGS) || {}
+    if (cachedData.togglesRow) {
+      cachedData.togglesRow.toggles = newToggles
+    } else {
+      cachedData.togglesRow = { id: togglesId || 1, toggles: newToggles }
+    }
+    cacheStore.setCache(CACHE_KEY_SETTINGS, cachedData)
+
+    supabase
       .from('system_toggles')
       .update({ toggles: newToggles })
-      .eq('id', togglesId || 1);
-
-    if (error) {
-      console.error('保存失败', error);
-      setToggles(toggles);
-    }
+      .eq('id', togglesId || 1)
+      .then(({ error }) => {
+        if (error) console.error('保存失败', error);
+      })
   }
 
   // Save Global Settings
   const handleSaveGlobalSettings = async () => {
-    try {
-      setSavingGlobal(true);
+    setSavingGlobal(true);
+    const payload = {
+      monthly_budget: Number(globalSettings.monthly_budget),
+      saving_goal: Number(globalSettings.saving_goal)
+    };
 
-      const payload = {
-        monthly_budget: Number(globalSettings.monthly_budget),
-        saving_goal: Number(globalSettings.saving_goal)
-      };
+    const cachedData = cacheStore.getCache<any>(CACHE_KEY_SETTINGS) || {}
+    cachedData.global = { ...globalSettings, ...payload }
+    cacheStore.setCache(CACHE_KEY_SETTINGS, cachedData)
 
-      let query = supabase.from("global_settings").update(payload);
+    let query = supabase.from("global_settings").update(payload);
 
-      if (globalSettings.id) {
-        query = query.eq("id", globalSettings.id);
-      } else {
-        query = query.neq("id", 0);
-      }
-
-      const { error } = await query;
-      if (error) throw error;
-
-      alert("全局设置保存成功");
-    } catch (error: any) {
-      console.error("Error saving global settings:", error);
-      alert("保存失败: " + (error?.message || "未知错误"));
-    } finally {
-      setSavingGlobal(false);
+    if (globalSettings.id) {
+      query = query.eq("id", globalSettings.id);
+    } else {
+      query = query.neq("id", 0);
     }
+
+    query.then(({error}) => {
+      if (error) console.error("Error saving global settings:", error);
+    })
+
+    setSavingGlobal(false);
+    alert("全局设置保存成功");
   }
 
   const handleClearData = async () => {

@@ -3,6 +3,7 @@
 import { useState, useEffect } from "react"
 import { useRouter } from "next/navigation"
 import { supabase } from "@/lib/supabase"
+import { cacheStore, CACHE_KEY_HOME } from "@/lib/cacheStore"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
@@ -104,27 +105,44 @@ export default function AddTransactionPage() {
       setSaving(true)
       const [budgetType, itemId] = selectedItemStr.split("|") as [BudgetType, string]
 
-      // 1. Insert Transaction (作为支出，金额存为负数)
-      const { error: txError } = await supabase
+      const newId = crypto.randomUUID()
+
+      // 乐观更新机制：先存入本地缓存并立刻返回首页
+      const cachedData = cacheStore.getCache<any>(CACHE_KEY_HOME)
+      if (cachedData && cachedData.transactions) {
+        cachedData.transactions.unshift({
+          id: newId,
+          amount: -numericAmount,
+          budget_type: budgetType,
+          item_id: itemId,
+          date: date,
+          note: note || null,
+          created_at: new Date().toISOString()
+        })
+        cacheStore.setCache(CACHE_KEY_HOME, cachedData)
+      }
+
+      // 2. 异步向 Supabase 插入数据，不阻塞 UI 线程
+      supabase
         .from("transactions")
         .insert({
+          id: newId,
           amount: -numericAmount,
           budget_type: budgetType,
           item_id: itemId,
           date: date,
           note: note || null,
         })
+        .then(({ error }) => {
+          if (error) {
+            console.error("Error saving transaction asynchronously:", error)
+          }
+        })
 
-      if (txError) throw txError
-
-      // 注意：这里删除了原来双写去更新预算表（consumed/remaining）的冗余逻辑
-      // 现在的架构严格遵循 Single Source of Truth，所有消费统计都交由前端读取 transactions 表动态运算解决。
-
-      window.location.href = "/"
+      router.push("/")
     } catch (error: any) {
       console.error("Error saving transaction:", error)
       alert("保存失败: " + (error?.message || "未知错误"))
-    } finally {
       setSaving(false)
     }
   }
