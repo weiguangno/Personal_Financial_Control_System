@@ -122,9 +122,15 @@ export default function AddPage() {
       cacheStore.setCache(CACHE_KEY_HOME, cachedData)
     }
 
-    // 释放 UI，瞬间跳转
+    // 释放 UI，瞬间跳转或提示
     setSaving(false)
-    router.push("/")
+    if (!navigator.onLine) {
+      alert("已离线保存！")
+      setAmount("")
+      setNote("")
+    } else {
+      router.push("/")
+    }
 
     // 异步向 Supabase 插入数据，不阻塞 UI 线程
     setSyncStatus("syncing")
