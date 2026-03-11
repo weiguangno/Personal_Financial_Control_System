@@ -4,6 +4,7 @@ import { useState, useEffect } from "react"
 import { useRouter } from "next/navigation"
 import { supabase } from "@/lib/supabase"
 import { cacheStore, CACHE_KEY_HOME } from "@/lib/cacheStore"
+import { useSync } from "@/components/SyncProvider"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
@@ -22,8 +23,9 @@ interface BudgetItemOption {
   label: string
 }
 
-export default function AddTransactionPage() {
+export default function AddPage() {
   const router = useRouter()
+  const { setSyncStatus } = useSync()
 
   const [budgetItems, setBudgetItems] = useState<BudgetItemOption[]>([])
   const [loadingItems, setLoadingItems] = useState(true)
@@ -122,6 +124,7 @@ export default function AddTransactionPage() {
         cacheStore.setCache(CACHE_KEY_HOME, cachedData)
       }
 
+      setSyncStatus("syncing")
       // 2. 异步向 Supabase 插入数据，不阻塞 UI 线程
       supabase
         .from("transactions")
@@ -136,6 +139,9 @@ export default function AddTransactionPage() {
         .then(({ error }) => {
           if (error) {
             console.error("Error saving transaction asynchronously:", error)
+            setSyncStatus("error")
+          } else {
+            setSyncStatus("synced")
           }
         })
 

@@ -6,6 +6,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { supabase } from "@/lib/supabase"
 import { cacheStore, CACHE_KEY_HOME } from "@/lib/cacheStore"
+import { useSync } from "@/components/SyncProvider"
 
 type BudgetType = "daily_fixed" | "monthly_fixed" | "monthly_elastic"
 
@@ -98,6 +99,7 @@ const clampMinZero = (value: number) => Math.max(0, value)
 
 export default function Home() {
   const router = useRouter()
+  const { setSyncStatus } = useSync()
 
   const [loading, setLoading] = useState(true)
   const [deletingId, setDeletingId] = useState<string | null>(null)
@@ -371,6 +373,7 @@ export default function Home() {
       }
 
       // 2. 异步在后台向 Supabase 拉取最新数据
+      setSyncStatus("syncing")
       const monthStartStr = getLastMonthStartStr()
       const [
         txRes,
@@ -411,9 +414,11 @@ export default function Home() {
 
       // 4. 静默校准 UI
       processAndSetHomeData(freshData)
+      setSyncStatus("synced")
 
     } catch (error) {
       console.error("Error fetching home data:", error)
+      setSyncStatus("error")
     } finally {
       setLoading(false)
     }
@@ -428,10 +433,12 @@ export default function Home() {
     };
 
     window.addEventListener("focus", handleFocus);
+    window.addEventListener("force-sync-refresh", handleFocus);
     document.addEventListener("visibilitychange", handleVisibility);
 
     return () => {
       window.removeEventListener("focus", handleFocus);
+      window.removeEventListener("force-sync-refresh", handleFocus);
       document.removeEventListener("visibilitychange", handleVisibility);
     };
   }, []);
@@ -450,14 +457,17 @@ export default function Home() {
         processAndSetHomeData(cachedData)
       }
 
+      setSyncStatus("syncing")
       const { error } = await supabase.from("transactions").delete().eq("id", tx.id)
 
       if (error) throw error
 
+      setSyncStatus("synced")
       fetchHomeData()
     } catch (error: any) {
       console.error("Error deleting transaction:", error)
       alert("删除失败: " + (error?.message || "未知错误"))
+      setSyncStatus("error")
     } finally {
       setDeletingId(null)
     }

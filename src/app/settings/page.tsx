@@ -9,8 +9,10 @@ import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { supabase } from "@/lib/supabase"
 import { cacheStore, CACHE_KEY_SETTINGS } from "@/lib/cacheStore"
+import { useSync } from "@/components/SyncProvider"
 
 export default function SettingsPage() {
+  const { setSyncStatus } = useSync()
   const [loading, setLoading] = useState(true)
 
   const [globalSettings, setGlobalSettings] = useState({
@@ -87,9 +89,11 @@ export default function SettingsPage() {
 
       cacheStore.setCache(CACHE_KEY_SETTINGS, freshData)
       processAndSetSettingsData(freshData)
+      setSyncStatus("synced")
 
     } catch (error) {
       console.error("Error fetching settings:", error)
+      setSyncStatus("error")
     } finally {
       setLoading(false)
     }
@@ -97,6 +101,9 @@ export default function SettingsPage() {
 
   useEffect(() => {
     fetchAllData()
+    const handleSync = () => fetchAllData()
+    window.addEventListener("force-sync-refresh", handleSync)
+    return () => window.removeEventListener("force-sync-refresh", handleSync)
   }, [])
 
   // Add new Budget Category
@@ -135,8 +142,14 @@ export default function SettingsPage() {
     if (newType === "monthly_elastic") cachedData.mElasticData = [...(cachedData.mElasticData || []), insertData]
     cacheStore.setCache(CACHE_KEY_SETTINGS, cachedData)
 
+    setSyncStatus("syncing")
     supabase.from(tableName).insert(insertData).then(({ error }) => {
-      if (error) console.error("Error adding budget", error)
+      if (error) {
+        console.error("Error adding budget", error)
+        setSyncStatus("error")
+      } else {
+        setSyncStatus("synced")
+      }
     })
   }
 
@@ -162,8 +175,14 @@ export default function SettingsPage() {
     }
     cacheStore.setCache(CACHE_KEY_SETTINGS, cachedData)
 
+    setSyncStatus("syncing")
     supabase.from(tableName).delete().eq("id", id).then(({error}) => {
-      if (error) console.error("Error deleting budget", error)
+      if (error) {
+        console.error("Error deleting budget", error)
+        setSyncStatus("error")
+      } else {
+        setSyncStatus("synced")
+      }
     })
   }
 
@@ -180,12 +199,18 @@ export default function SettingsPage() {
     }
     cacheStore.setCache(CACHE_KEY_SETTINGS, cachedData)
 
+    setSyncStatus("syncing")
     supabase
       .from('system_toggles')
       .update({ toggles: newToggles })
       .eq('id', togglesId || 1)
       .then(({ error }) => {
-        if (error) console.error('保存失败', error);
+        if (error) {
+          console.error('保存失败', error)
+          setSyncStatus("error")
+        } else {
+          setSyncStatus("synced")
+        }
       })
   }
 
@@ -209,8 +234,14 @@ export default function SettingsPage() {
       query = query.neq("id", 0);
     }
 
+    setSyncStatus("syncing")
     query.then(({error}) => {
-      if (error) console.error("Error saving global settings:", error);
+      if (error) {
+        console.error("Error saving global settings:", error)
+        setSyncStatus("error")
+      } else {
+        setSyncStatus("synced")
+      }
     })
 
     setSavingGlobal(false);

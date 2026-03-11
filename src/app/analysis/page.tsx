@@ -5,6 +5,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { supabase } from "@/lib/supabase"
 import { cacheStore, CACHE_KEY_ANALYSIS } from "@/lib/cacheStore"
+import { useSync } from "@/components/SyncProvider"
 import { BarChart, Bar, XAxis, Tooltip, ResponsiveContainer } from "recharts"
 
 type BudgetType = "daily_fixed" | "monthly_fixed" | "monthly_elastic"
@@ -162,6 +163,7 @@ function getMonthlyStatus(consumed: number, budget: number, strictMode: boolean)
 }
 
 export default function AnalysisPage() {
+  const { setSyncStatus } = useSync()
   const [loading, setLoading] = useState(true)
 
   const [dailyBudgets, setDailyBudgets] = useState<ProgressItem[]>([])
@@ -364,6 +366,7 @@ export default function AnalysisPage() {
         setLoading(true)
       }
 
+      setSyncStatus("syncing")
       const monthStartStr = getLastMonthStartStr()
       const [
         dailyRes,
@@ -409,9 +412,11 @@ export default function AnalysisPage() {
 
       cacheStore.setCache(CACHE_KEY_ANALYSIS, freshData)
       processData(freshData)
+      setSyncStatus("synced")
 
     } catch (error) {
       console.error("Error fetching analysis data:", error)
+      setSyncStatus("error")
     } finally {
       setLoading(false)
     }
@@ -433,10 +438,12 @@ export default function AnalysisPage() {
     }
 
     window.addEventListener("focus", handleFocus)
+    window.addEventListener("force-sync-refresh", handleFocus)
     document.addEventListener("visibilitychange", handleVisibilityChange)
 
     return () => {
       window.removeEventListener("focus", handleFocus)
+      window.removeEventListener("force-sync-refresh", handleFocus)
       document.removeEventListener("visibilitychange", handleVisibilityChange)
     }
   }, [fetchData])
