@@ -1,15 +1,21 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
+import Link from "next/link";
 import { SyncProvider } from "@/components/SyncProvider";
 import "./globals.css";
 
 export const metadata: Metadata = {
   title: "Living Cost Pro",
   description: "Personal living cost tracking tool",
+  manifest: "/manifest.json",
   appleWebApp: {
     capable: true,
     statusBarStyle: "default",
     title: "记账 Pro",
   },
+};
+
+export const viewport: Viewport = {
+  themeColor: "#ffffff",
 };
 
 export default function RootLayout({
@@ -27,18 +33,18 @@ export default function RootLayout({
 
           {/* Fixed Bottom Navigation */}
           <nav className="fixed bottom-0 left-0 right-0 h-16 bg-white border-t border-gray-200 flex items-center justify-around z-50 px-4 max-w-md mx-auto">
-            <a href="/" className="flex flex-col items-center justify-center w-full h-full text-gray-600 hover:text-primary transition-colors">
+            <Link href="/" prefetch={true} className="flex flex-col items-center justify-center w-full h-full text-gray-600 hover:text-primary transition-colors">
               <span className="text-xl mb-1">🏠</span>
               <span className="text-[10px] font-medium">首页</span>
-            </a>
-            <a href="/analysis" className="flex flex-col items-center justify-center w-full h-full text-gray-600 hover:text-primary transition-colors">
+            </Link>
+            <Link href="/analysis" prefetch={true} className="flex flex-col items-center justify-center w-full h-full text-gray-600 hover:text-primary transition-colors">
               <span className="text-xl mb-1">📊</span>
               <span className="text-[10px] font-medium">分析</span>
-            </a>
-            <a href="/settings" className="flex flex-col items-center justify-center w-full h-full text-gray-600 hover:text-primary transition-colors">
+            </Link>
+            <Link href="/settings" prefetch={true} className="flex flex-col items-center justify-center w-full h-full text-gray-600 hover:text-primary transition-colors">
               <span className="text-xl mb-1">⚙️</span>
               <span className="text-[10px] font-medium">设置</span>
-            </a>
+            </Link>
           </nav>
         </SyncProvider>
       </body>
