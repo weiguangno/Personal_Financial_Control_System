@@ -604,13 +604,13 @@ export default function SettingsPage() {
                     {editingItem?.id === item.id ? (
                       <div className="flex gap-2 w-full">
                         <Input
-                          value={editingItem.name}
+                          value={editingItem?.name || ""}
                           onChange={e => setEditingItem(prev => prev ? {...prev, name: e.target.value} : null)}
                           className="flex-1 bg-white h-8 text-sm"
                         />
                         <Input
                           type="number"
-                          value={editingItem.amount}
+                          value={editingItem?.amount || ""}
                           onChange={e => setEditingItem(prev => prev ? {...prev, amount: e.target.value} : null)}
                           className="w-20 bg-white h-8 text-sm px-2"
                         />
@@ -639,13 +639,13 @@ export default function SettingsPage() {
                     {editingItem?.id === item.id ? (
                       <div className="flex gap-2 w-full">
                         <Input
-                          value={editingItem.name}
+                          value={editingItem?.name || ""}
                           onChange={e => setEditingItem(prev => prev ? {...prev, name: e.target.value} : null)}
                           className="flex-1 bg-white h-8 text-sm"
                         />
                         <Input
                           type="number"
-                          value={editingItem.amount}
+                          value={editingItem?.amount || ""}
                           onChange={e => setEditingItem(prev => prev ? {...prev, amount: e.target.value} : null)}
                           className="w-20 bg-white h-8 text-sm px-2"
                         />
