@@ -84,7 +84,7 @@ export default function AddPage() {
     fetchBudgets()
   }, [])
 
-  const handleSubmit = async (e: React.FormEvent) => {
+  const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
 
     const numericAmount = Number(amount)
@@ -103,54 +103,49 @@ export default function AddPage() {
       return
     }
 
-    try {
-      setSaving(true)
-      const [budgetType, itemId] = selectedItemStr.split("|") as [BudgetType, string]
+    setSaving(true)
+    const [budgetType, itemId] = selectedItemStr.split("|") as [BudgetType, string]
+    const newId = crypto.randomUUID()
 
-      const newId = crypto.randomUUID()
-
-      // 乐观更新机制：先存入本地缓存并立刻返回首页
-      const cachedData = cacheStore.getCache<any>(CACHE_KEY_HOME)
-      if (cachedData && cachedData.transactions) {
-        cachedData.transactions.unshift({
-          id: newId,
-          amount: -numericAmount,
-          budget_type: budgetType,
-          item_id: itemId,
-          date: date,
-          note: note || null,
-          created_at: new Date().toISOString()
-        })
-        cacheStore.setCache(CACHE_KEY_HOME, cachedData)
-      }
-
-      setSyncStatus("syncing")
-      // 2. 异步向 Supabase 插入数据，不阻塞 UI 线程
-      supabase
-        .from("transactions")
-        .insert({
-          id: newId,
-          amount: -numericAmount,
-          budget_type: budgetType,
-          item_id: itemId,
-          date: date,
-          note: note || null,
-        })
-        .then(({ error }) => {
-          if (error) {
-            console.error("Error saving transaction asynchronously:", error)
-            setSyncStatus("error")
-          } else {
-            setSyncStatus("synced")
-          }
-        })
-
-      router.push("/")
-    } catch (error: any) {
-      console.error("Error saving transaction:", error)
-      alert("保存失败: " + (error?.message || "未知错误"))
-      setSaving(false)
+    // 乐观更新机制：先存入本地缓存
+    const cachedData = cacheStore.getCache<any>(CACHE_KEY_HOME)
+    if (cachedData && cachedData.transactions) {
+      cachedData.transactions.unshift({
+        id: newId,
+        amount: -numericAmount,
+        budget_type: budgetType,
+        item_id: itemId,
+        date: date,
+        note: note || null,
+        created_at: new Date().toISOString()
+      })
+      cacheStore.setCache(CACHE_KEY_HOME, cachedData)
     }
+
+    // 释放 UI，瞬间跳转
+    setSaving(false)
+    router.push("/")
+
+    // 异步向 Supabase 插入数据，不阻塞 UI 线程
+    setSyncStatus("syncing")
+    supabase
+      .from("transactions")
+      .insert({
+        id: newId,
+        amount: -numericAmount,
+        budget_type: budgetType,
+        item_id: itemId,
+        date: date,
+        note: note || null,
+      })
+      .then(({ error }) => {
+        if (error) {
+          console.error("Error saving transaction asynchronously:", error)
+          setSyncStatus("error")
+        } else {
+          setSyncStatus("synced")
+        }
+      })
   }
 
   return (

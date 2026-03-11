@@ -215,8 +215,7 @@ export default function SettingsPage() {
   }
 
   // Save Global Settings
-  const handleSaveGlobalSettings = async () => {
-    setSavingGlobal(true);
+  const handleSaveGlobalSettings = () => {
     const payload = {
       monthly_budget: Number(globalSettings.monthly_budget),
       saving_goal: Number(globalSettings.saving_goal)
@@ -243,23 +242,32 @@ export default function SettingsPage() {
         setSyncStatus("synced")
       }
     })
-
-    setSavingGlobal(false);
-    alert("全局设置保存成功");
   }
 
-  const handleClearData = async () => {
+  const handleClearData = () => {
     if (window.confirm('警告：此操作将清空所有记账流水（不删预算分类），确定吗？')) {
-      try {
-        setLoading(true);
-        const { error } = await supabase.from('transactions').delete().neq('id', '00000000-0000-0000-0000-000000000000');
-        if (error) throw error;
-        alert('清空成功');
-        window.location.reload();
-      } catch (error: any) {
-        alert("清空失败: " + (error?.message || "未知错误"));
-        setLoading(false);
+      const cachedHome = cacheStore.getCache<any>("home")
+      if (cachedHome) {
+        cachedHome.transactions = []
+        cacheStore.setCache("home", cachedHome)
       }
+      const cachedAnalysis = cacheStore.getCache<any>("analysis")
+      if (cachedAnalysis) {
+        cachedAnalysis.transactions = []
+        cacheStore.setCache("analysis", cachedAnalysis)
+      }
+
+      setSyncStatus("syncing")
+      supabase.from('transactions').delete().neq('id', '00000000-0000-0000-0000-000000000000')
+        .then(({error}) => {
+          if (error) {
+            console.error("Error clearing data:", error)
+            setSyncStatus("error")
+          } else {
+            setSyncStatus("synced")
+          }
+        })
+      window.dispatchEvent(new Event("force-sync-refresh"))
     }
   }
 
@@ -293,7 +301,6 @@ export default function SettingsPage() {
       if (!confirmImport) return;
 
       try {
-        setLoading(true);
         const text = await file.text();
         let data = JSON.parse(text);
 
@@ -307,14 +314,19 @@ export default function SettingsPage() {
           return rest;
         });
 
-        const { error } = await supabase.from('transactions').insert(data);
-        if (error) throw error;
+        setSyncStatus("syncing")
+        supabase.from('transactions').insert(data).then(({error}) => {
+          if (error) {
+            console.error("Error importing data:", error)
+            setSyncStatus("error")
+          } else {
+            setSyncStatus("synced")
+          }
+        })
 
-        alert("导入成功");
-        window.location.reload();
+        window.dispatchEvent(new Event("force-sync-refresh"))
       } catch (error: any) {
-        alert("导入失败: " + (error?.message || "未知错误"));
-        setLoading(false);
+        console.error("导入失败", error)
       }
     };
     input.click();
