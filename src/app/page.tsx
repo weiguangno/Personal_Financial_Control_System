@@ -366,6 +366,9 @@ export default function Home() {
       const lastMonthYear = lastMonthDate.getFullYear();
       const lastMonth = lastMonthDate.getMonth() + 1; // 1-12
 
+      // 确定性 ID：同一年月永远对应同一个 ID，并发时 upsert 只会覆盖更新
+      const deterministicId = `balance-${lastMonthYear}-${String(lastMonth).padStart(2, '0')}`;
+
       const lastMonthStartStr = `${lastMonthYear}-${String(lastMonth).padStart(2, '0')}-01`;
       const endOfLastMonth = new Date(today.getFullYear(), today.getMonth(), 0);
       const lastMonthEndStr = `${lastMonthYear}-${String(lastMonth).padStart(2, '0')}-${String(endOfLastMonth.getDate()).padStart(2, '0')}T23:59:59.999Z`;
@@ -377,18 +380,11 @@ export default function Home() {
 
       // Group inquiries into Promise.all to reduce waterfall delays
       const [
-        { data: existingRecord },
         { data: globalData },
         { data: togglesData },
         { data: txData },
         { data: prevRecord }
       ] = await Promise.all([
-        supabase
-          .from("monthly_balance_records")
-          .select("id, monthly_actual_consumed")
-          .eq("year", lastMonthYear)
-          .eq("month", lastMonth)
-          .maybeSingle(),
         supabase.from("global_settings").select("*").limit(1).maybeSingle(),
         supabase.from("system_toggles").select("*").limit(1).maybeSingle(),
         supabase
@@ -420,38 +416,9 @@ export default function Home() {
       const monthly_balance = calculatedBudget - lastMonthConsumed;
       const cumulative_balance = previous_cumulative + monthly_balance;
 
-      if (existingRecord) {
-        if (Math.abs(toNumber(existingRecord.monthly_actual_consumed) - lastMonthConsumed) < 0.01) {
-          return; // No differences, return silently
-        }
-
-        const updateRecord = {
-          global_monthly_budget: raw_budget,
-          saving_goal: saving_goal,
-          monthly_budget: calculatedBudget,
-          monthly_actual_consumed: lastMonthConsumed,
-          monthly_balance: monthly_balance,
-          cumulative_balance: cumulative_balance
-        };
-
-        const { error: updateError } = await supabase
-          .from("monthly_balance_records")
-          .update(updateRecord)
-          .eq("id", existingRecord.id);
-
-        if (!updateError) {
-          cacheStore.clearCache(CACHE_KEY_ANALYSIS);
-          console.log(
-            "%c[Monthly Settlement Debug]", 
-            "background: #8b5cf6; color: white; padding: 4px; border-radius: 4px;",
-            { Action: "Updated", SettledYear: lastMonthYear, SettledMonth: lastMonth, global: raw_budget, saving: saving_goal, Budget: calculatedBudget, Consumed: lastMonthConsumed, Balance: monthly_balance, Cumulative: cumulative_balance }
-          );
-        }
-        return;
-      }
-
-      const insertRecord = {
-        id: crypto.randomUUID(),
+      // 使用确定性 ID + upsert，并发触发时只会对同一个 ID 覆盖，不会产生新记录
+      const upsertRecord = {
+        id: deterministicId,
         year: lastMonthYear,
         month: lastMonth,
         global_monthly_budget: raw_budget,
@@ -462,14 +429,16 @@ export default function Home() {
         cumulative_balance: cumulative_balance
       };
 
-      const { error: insertError } = await supabase.from("monthly_balance_records").insert(insertRecord);
-      
-      if (!insertError) {
+      const { error: upsertError } = await supabase
+        .from("monthly_balance_records")
+        .upsert(upsertRecord);
+
+      if (!upsertError) {
         cacheStore.clearCache(CACHE_KEY_ANALYSIS);
         console.log(
-          "%c[Monthly Settlement Debug]", 
+          "%c[Monthly Settlement Debug]",
           "background: #8b5cf6; color: white; padding: 4px; border-radius: 4px;",
-          { Action: "Inserted", SettledYear: lastMonthYear, SettledMonth: lastMonth, Budget: calculatedBudget, Consumed: lastMonthConsumed, Balance: monthly_balance, Cumulative: cumulative_balance }
+          { Action: "Upserted", Id: deterministicId, SettledYear: lastMonthYear, SettledMonth: lastMonth, global: raw_budget, saving: saving_goal, Budget: calculatedBudget, Consumed: lastMonthConsumed, Balance: monthly_balance, Cumulative: cumulative_balance }
         );
       }
     } catch (err) {

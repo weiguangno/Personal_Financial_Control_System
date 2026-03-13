@@ -465,7 +465,8 @@ export default function SettingsPage() {
         let monthSavingGoal = current_saving_goal;
         
         const existingRecord = recordsMap.get(k);
-        let recordId = crypto.randomUUID();
+        // 没有历史记录时使用确定性 ID，防止重建产生重复数据
+        let recordId = `balance-${y}-${String(m).padStart(2, '0')}`;
         
         // Preserve historical budget values if they exist
         if (existingRecord) {

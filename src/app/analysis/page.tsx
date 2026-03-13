@@ -192,9 +192,63 @@ export default function AnalysisPage() {
       const toggles = data.toggles || {}
       const global = data.global || {}
 
-      const validBalanceData = balanceData.filter(
+      // ── 历史脏数据清洗：去重 + 后台删除 UUID 格式的重复记录 ──────────────────
+      // 1. 按 year+month 分组，每组选出"最优"记录（优先有消费数据且最新）
+      const groupMap = new Map<string, BalanceRecordRow>();
+      const duplicateIds: string[] = [];
+
+      for (const record of balanceData) {
+        const key = `${record.year}-${String(record.month).padStart(2, '0')}`;
+        const existing = groupMap.get(key);
+        if (!existing) {
+          groupMap.set(key, record);
+        } else {
+          // 优先保留 monthly_actual_consumed 有值的；若都有值则保留 updated_at 更新的
+          const recordHasData = toNumber(record.monthly_actual_consumed) > 0;
+          const existingHasData = toNumber(existing.monthly_actual_consumed) > 0;
+          let preferRecord = false;
+          if (recordHasData && !existingHasData) {
+            preferRecord = true;
+          } else if (recordHasData === existingHasData) {
+            // 两者同等条件时，按 id 字典序：确定性 ID (balance-YYYY-MM) 优先于 UUID
+            const recordIsCanonical = record.id && record.id.startsWith('balance-');
+            const existingIsCanonical = existing.id && existing.id.startsWith('balance-');
+            if (recordIsCanonical && !existingIsCanonical) preferRecord = true;
+          }
+          if (preferRecord) {
+            if (existing.id) duplicateIds.push(existing.id);
+            groupMap.set(key, record);
+          } else {
+            if (record.id) duplicateIds.push(record.id);
+          }
+        }
+      }
+
+      const deduplicatedBalanceData = Array.from(groupMap.values());
+
+      // 2. 后台静默删除多余的重复记录（不阻塞 UI 渲染）
+      if (duplicateIds.length > 0) {
+        supabase
+          .from('monthly_balance_records')
+          .delete()
+          .in('id', duplicateIds)
+          .then(({ error }) => {
+            if (!error) {
+              console.log(
+                '%c[Data Cleanup]',
+                'background: #10b981; color: white; padding: 4px; border-radius: 4px;',
+                `静默删除了 ${duplicateIds.length} 条重复月度记录:`, duplicateIds
+              );
+              // 3. 清理本地缓存，下次 fetch 将拉取干净数据
+              cacheStore.clearCache(CACHE_KEY_ANALYSIS);
+            }
+          });
+      }
+
+      const validBalanceData = deduplicatedBalanceData.filter(
         (record) => toNumber(record.monthly_budget) > 0 || toNumber(record.monthly_actual_consumed) > 0
-      )
+      );
+      // ──────────────────────────────────────────────────────────────────────────
       
       setBalanceRecords(validBalanceData)
 
